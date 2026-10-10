@@ -1,0 +1,26 @@
+[package]
+name = "proclens-app"
+version = "0.0.1"
+description = "ProcLens: see what your PC is really running"
+authors = ["Anubis Productions"]
+edition = "2021"
+
+[lib]
+# The `_lib` suffix avoids a Windows-only name clash with the bin target
+# (https://github.com/rust-lang/cargo/issues/8519).
+name = "proclens_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[features]
+# Embeds the built front end (../dist) instead of loading the dev server. `tauri build` turns this
+# on for you; for a plain `cargo build --release` pass `--features custom-protocol`.
+custom-protocol = ["tauri/custom-protocol"]
+
+[dependencies]
+proclens-proto = { path = "../../proto" }
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

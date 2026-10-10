@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["proto", "collector", "app/src-tauri"]
+exclude = ["vendor"]
+
+[patch.crates-io]
+ferrisetw = { path = "vendor/ferrisetw" }

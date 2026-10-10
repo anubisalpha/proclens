@@ -1,0 +1,51 @@
+{
+  "id": "windows-10-19045",
+  "title": "Windows 10 22H2 (build 19045)",
+  "os": { "major": 10, "minor": 0, "build": 19045 },
+  "verified": {
+    "ubr": 7725,
+    "date": "2026-10-10",
+    "machine": "Windows 10 Home 22H2 (Core), AMD64, Intel i7-2600K 8 logical CPUs, 32 GB RAM, 2 SATA SSD + 3 USB disks, NVIDIA GPU"
+  },
+  "verified_capabilities": [
+    "process_list",
+    "memory_counters",
+    "memory_lists",
+    "etw_kernel_session",
+    "etw_disk_io",
+    "etw_file_io",
+    "etw_dpc_isr",
+    "handle_table_names"
+  ],
+  "etw": {
+    "session_flags_note": "One kernel session; flags ORed: PROCESS|THREAD via Thread provider, FILE_IO 0x02000000 | FILE_IO_INIT 0x04000000 | DISK_FILE_IO 0x200, DISK_IO, DPC 0x20 | INTERRUPT 0x40",
+    "needs_raw_timestamps": true,
+    "dpc_opcodes": [66, 68, 69],
+    "isr_opcodes": [67, 50],
+    "isr_opcode_50_name": "ISR-MSI (message-signalled interrupts: GPU, NIC, NVMe)",
+    "file_read_write_opcodes": [67, 68],
+    "file_operation_end_opcode": 76,
+    "file_create_opcode": 64,
+    "file_close_opcode": 66,
+    "disk_read_write_opcodes": [10, 11],
+    "thread_rundown_opcode": 3,
+    "file_read_write_fields": ["IrpPtr", "FileObject", "IoSize", "IoFlags"],
+    "paging_io_flags": { "IRP_PAGING_IO": 2, "IRP_SYNCHRONOUS_PAGING_IO": 64 },
+    "end_of_file_ntstatus": "0xC0000011",
+    "disk_response_time_unit_assumed": "100 ns (equal to a QPC tick on this machine; latencies of 70-260 us on SATA SSD look plausible, not independently verified)"
+  },
+  "quirks": [
+    "FileIo name events (opcodes 0, 36) never arrived in a live session; names come from Create (op64) OpenPath, and from the system handle table for files opened before the trace.",
+    "FileIo Read/Write IoSize is the REQUESTED size; the transferred size is OperationEnd (op76) ExtraInfo matched by IrpPtr.",
+    "FileObject addresses are recycled after Close (op66); resolve names when each event arrives.",
+    "A flush (FlushFileBuffers/sync_all) makes the cache manager write the pages as paging I/O credited to the CALLING process; counted as application writes it doubled a 64 MiB write to 128 MiB. Paging requests (IoFlags & 0x42) are excluded from per-process and per-file figures.",
+    "Reading to the end of a file completes with STATUS_END_OF_FILE (0xC0000011); that is not a failed request.",
+    "Some disk requests cannot be tied to a thread/process; they carry pid 0xFFFFFFFF, shown as '(unknown process)'.",
+    "Live ETW self-tests (collector startup, ~2.5 s) write and read back an 8 MiB file and require it to be measured within bounds; all four passed on this build.",
+    "DPC/ISR InitialTime is a raw QPC tick count; header timestamps are only comparable when the trace requests raw timestamps (vendored ferrisetw patch).",
+    "Some DPC events have InitialTime = 0, giving a duration equal to time since boot; durations over 1 s are dropped.",
+    "SystemMemoryListInformation (class 80) needs SeProfileSingleProcessPrivilege; free+zero+standby matched PhysicalAvailable to within 1 MB.",
+    "Unelevated process lists under-report working sets of protected processes by roughly 2.4 GB on this machine.",
+    "ETW DPC total was within about 14-27% of the Windows '% DPC Time' counter and ISR within about 27% (collector low); not exact."
+  ]
+}
