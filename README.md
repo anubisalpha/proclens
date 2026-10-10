@@ -51,6 +51,14 @@ To support another PC: run `collector profile` there, check the self-tests, repe
 checks (`tools/run-elevated.ps1`, comparing against Windows' own counters as in
 `SPIKE_FINDINGS.md`), then add a profile JSON and register it in `collector/src/profile.rs`.
 
+## License
+
+MIT, see [LICENSE](LICENSE). Copyright (c) 2026 Anubis Productions.
+
+`vendor/ferrisetw` is a patched copy of [ferrisetw](https://github.com/n4r1b/ferrisetw) and stays
+under its own terms (MIT OR Apache-2.0, see `vendor/ferrisetw/License.md`). Other dependencies keep
+their own licences.
+
 ## Status
 
 Working and verified on this machine (Windows 10 22H2, 19045.7725): memory breakdown, process

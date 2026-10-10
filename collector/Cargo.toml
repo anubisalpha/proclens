@@ -2,6 +2,7 @@
 name = "collector"
 version = "0.0.1"
 edition = "2021"
+license = "MIT"
 description = "ProcLens elevated collector (spike)"
 
 [dependencies]

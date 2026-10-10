@@ -4,6 +4,7 @@ version = "0.0.1"
 description = "ProcLens: see what your PC is really running"
 authors = ["Anubis Productions"]
 edition = "2021"
+license = "MIT"
 
 [lib]
 # The `_lib` suffix avoids a Windows-only name clash with the bin target
