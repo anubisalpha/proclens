@@ -1,0 +1,141 @@
+# Verifies every push and pull request by running the same script a release is built with
+# (tools/package-release.ps1: version check, tests, builds, third-party notices, zip, installer),
+# then installs the built setup.exe silently and checks the result. Nothing is published or uploaded:
+# releases are still built and smoke-tested locally, because builds are not byte-reproducible and a
+# release must be the exact files that were tested.
+#
+# Limits: GitHub's runners cannot show a UAC prompt or run the elevated collector against a real
+# desktop, so the collector start/stop and the UI tabs are NOT covered here; they are checked by hand.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+# A newer push to the same branch makes an in-progress run obsolete; never cancel a tag run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      # Actions are pinned to commit SHAs (the tag is in the comment); update them deliberately.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      # package-release.ps1 builds into target-release, not target.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: ". -> target-release"
+
+      - name: Install Inno Setup
+        run: |
+          choco install innosetup --no-progress -y
+          if ($LASTEXITCODE -ne 0) { throw "choco install innosetup failed ($LASTEXITCODE)" }
+
+      - name: Install front-end dependencies
+        working-directory: app
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { throw "npm ci failed ($LASTEXITCODE)" }
+
+      - name: Tag must match the version
+        if: github.ref_type == 'tag'
+        run: |
+          $version = (Get-Content app/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw "tag $env:GITHUB_REF_NAME does not match version $version in tauri.conf.json" }
+          if (-not (Test-Path "docs/releases/v$version.md")) { throw "docs/releases/v$version.md (the release notes) is missing" }
+          Write-Host "tag $env:GITHUB_REF_NAME matches version $version and has release notes"
+
+      - name: Package (version check, tests, builds, notices, zip, installer)
+        run: |
+          .\tools\package-release.ps1
+          if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) { throw "package-release.ps1 failed ($LASTEXITCODE)" }
+
+      - name: Installer smoke test (silent install, check, uninstall)
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Get-Content app/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $setup = Resolve-Path "dist\proclens-$version-windows-x64-setup.exe"
+          $stage = Resolve-Path "dist\proclens-$version-windows-x64"
+          $dir = Join-Path $env:ProgramFiles 'ProcLens'
+          $appId = '{3E30B156-8522-406E-B43A-006244AB3087}_is1'
+          $uninstallKey = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$appId"
+          $startMenu = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs'
+          $problems = @()
+
+          Write-Host '--- install'
+          $p = Start-Process -FilePath $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$env:RUNNER_TEMP\setup.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "setup exited with code $($p.ExitCode)" }
+
+          Write-Host '--- installed files match what was packaged'
+          foreach ($f in Get-ChildItem $stage -File) {
+              $target = Join-Path $dir $f.Name
+              if (-not (Test-Path $target)) { $problems += "missing after install: $($f.Name)"; continue }
+              if ((Get-FileHash $target).Hash -ne (Get-FileHash $f.FullName).Hash) { $problems += "differs from the packaged file: $($f.Name)" }
+          }
+          if (-not (Test-Path (Join-Path $dir 'run-discover.ps1'))) { $problems += 'missing after install: run-discover.ps1' }
+          if (-not (Test-Path (Join-Path $dir 'unins000.exe'))) { $problems += 'missing after install: unins000.exe' }
+
+          Write-Host '--- Start menu folder and Apps & features entry'
+          foreach ($n in 'ProcLens', 'README', 'Release notes', 'Check this PC (discover)', 'Uninstall ProcLens') {
+              if (-not (Test-Path (Join-Path $startMenu "ProcLens\$n.lnk"))) { $problems += "missing Start menu shortcut: ProcLens\$n" }
+          }
+          if (Test-Path (Join-Path $startMenu 'ProcLens.lnk')) { $problems += 'unexpected shortcut directly in the Start menu (ProcLens.lnk)' }
+          # The desktop shortcut task is ticked by default, so a silent install creates it.
+          $desktopLink = Join-Path $env:PUBLIC 'Desktop\ProcLens.lnk'
+          if (-not (Test-Path $desktopLink)) { $problems += 'missing desktop shortcut (the task should be ticked by default)' }
+          if (-not (Test-Path $uninstallKey)) { $problems += 'no Apps & features registry entry' }
+
+          Write-Host '--- the installed collector runs (profile prints this runner''s build; it will say untested)'
+          & (Join-Path $dir 'collector.exe') profile
+          if ($LASTEXITCODE -ne 0) { $problems += "collector.exe profile exited with $LASTEXITCODE" }
+
+          Write-Host '--- uninstall'
+          $u = Start-Process -FilePath (Join-Path $dir 'unins000.exe') -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$env:RUNNER_TEMP\uninstall.log" -Wait -PassThru
+          if ($u.ExitCode -ne 0) { $problems += "uninstaller exited with code $($u.ExitCode)" }
+          # The uninstaller hands off to a second process, so wait for it to finish its work.
+          $deadline = (Get-Date).AddSeconds(90)
+          while ((Test-Path $uninstallKey) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
+          Start-Sleep -Seconds 5
+          if (Test-Path $uninstallKey) { $problems += 'uninstall registry entry still present' }
+          if (Test-Path (Join-Path $startMenu 'ProcLens')) { $problems += 'Start menu folder still present after uninstall' }
+          if (Test-Path $desktopLink) { $problems += 'desktop shortcut still present after uninstall' }
+          foreach ($leftover in 'proclens-app.exe', 'collector.exe', 'run-discover.ps1', 'unins000.exe') {
+              if (Test-Path (Join-Path $dir $leftover)) { $problems += "still present after uninstall: $leftover" }
+          }
+          # Informational, not a failure: on the development PC an empty install folder was left behind.
+          if (Test-Path $dir) { Write-Host "NOTE: $dir still exists after uninstall with $(@(Get-ChildItem $dir -Force).Count) item(s)" }
+          else { Write-Host "NOTE: $dir was removed completely" }
+
+          if ($problems.Count -gt 0) {
+              $problems | ForEach-Object { Write-Host "FAIL: $_" }
+              throw "$($problems.Count) installer check(s) failed"
+          }
+          Write-Host 'Installer smoke test passed.'
+
+      - name: Installer logs (on failure)
+        if: failure()
+        run: |
+          foreach ($f in "$env:RUNNER_TEMP\setup.log", "$env:RUNNER_TEMP\uninstall.log") {
+              if (Test-Path $f) { Write-Host "===== $f"; Get-Content $f -Tail 80 }
+          }
