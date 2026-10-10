@@ -2,6 +2,7 @@
 #   .\tools\package-release.ps1                 # writes dist\proclens-<version>-windows-x64.zip (+ .sha256)
 #   .\tools\package-release.ps1 -AllowDirty     # package an uncommitted tree (never for a published release)
 #
+# Builds go to .\target-release (not .\target), so a running dev copy can't block them.
 # Steps: check the version numbers agree and the tree is clean, run every test, build the UI, the
 # collector and the app, stage the files, generate the third-party notices, zip, and checksum.
 param(
@@ -11,6 +12,10 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location $root
+
+# Build into a directory of its own: it never collides with a running dev copy of the app or
+# collector (which lock their .exe files), and a release can't pick up stale dev artifacts.
+$env:CARGO_TARGET_DIR = Join-Path $root 'target-release'
 
 function Step($m) { Write-Host "==> $m" -ForegroundColor Cyan }
 function Run([string]$exe, [string[]]$argv) {
@@ -53,7 +58,8 @@ $stage = Join-Path $OutDir $name
 if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item -ItemType Directory -Force $stage | Out-Null
 Step "Staging $stage"
-Copy-Item target\release\proclens-app.exe, target\release\collector.exe, LICENSE, README.md $stage
+$bin = Join-Path $env:CARGO_TARGET_DIR 'release'
+Copy-Item (Join-Path $bin 'proclens-app.exe'), (Join-Path $bin 'collector.exe'), LICENSE, README.md $stage
 Copy-Item vendor\ferrisetw\License.md (Join-Path $stage 'ferrisetw-LICENSE.md')
 $notes = "docs\releases\v$version.md"
 if (Test-Path $notes) { Copy-Item $notes (Join-Path $stage 'RELEASE-NOTES.md') } else { Write-Warning "no $notes" }

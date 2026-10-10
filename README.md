@@ -61,7 +61,7 @@ checks (`tools/run-elevated.ps1`, comparing against Windows' own counters as in
 
 Pre-built Windows x64 zips are on the [Releases page](https://github.com/anubisalpha/proclens/releases)
 (read the release notes first: the beta is verified on one PC only). To build one yourself from a
-clean checkout: `.\tools\package-release.ps1`, which runs every test, builds, adds the third-party
+clean checkout: `.\tools\package-release.ps1`, which runs every test, builds (into `target-release\`), adds the third-party
 notices and writes `dist\proclens-<version>-windows-x64.zip` with a SHA-256 file. Release notes
 live in [`docs/releases/`](docs/releases/).
 
