@@ -97,8 +97,9 @@ profile and self-tests, not the documentation, are what protect us here.
 
 ## Undocumented things we depend on (no Microsoft page found)
 
-Each is guarded by a runtime check, so a different build switches the feature off instead of
-showing wrong numbers.
+Each is guarded by a runtime check, so a different build shows up as a failed check on the This PC tab
+and as a warning on the affected view (the memory breakdown also turns itself off), instead of going
+unnoticed.
 
 | Dependency | Where | Source of our knowledge | Guard |
 |---|---|---|---|

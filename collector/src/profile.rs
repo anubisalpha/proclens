@@ -5,7 +5,7 @@
 //! - **Profiles** (`profiles/*.json`): what was verified *by hand* on which exact build, plus the
 //!   quirks found there. Supporting another PC means adding a file.
 //! - **Self-tests** (this module): what provably works on *this* machine *right now*. A failed
-//!   test switches the feature off instead of showing wrong numbers, even on a build with no profile.
+//!   test is reported (This PC tab, plus a warning on the affected view) even on a build with no\n//!   profile. The memory breakdown also switches itself off per sample when its invariant fails; the\n//!   trace views keep running, so a failed check there means \
 
 use std::sync::{Arc, OnceLock};
 
@@ -231,8 +231,18 @@ fn etw_checks(profile: &Option<KnownProfile>) -> Vec<Capability> {
         Ok(())
     })();
     let _ = std::fs::remove_file(&path);
-    std::thread::sleep(std::time::Duration::from_millis(1200)); // let completions and names arrive
-
+    // Events arrive in batches about a second late and later under load, so wait until this
+    // process is credited with the whole workload (or give up after 6 s and let the check report
+    // what it measured). A fixed 1.2 s sleep made this check flaky.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+    loop {
+        let (r, w) = session.peek_file_bytes(std::process::id());
+        if (r >= (CHUNKS * MIB) as u64 && w >= (CHUNKS * MIB) as u64) || std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(400)); // a little more for names and the other checks
     let health = session.health();
     let iv = session.take_interval();
     let diag = session.diagnostics();

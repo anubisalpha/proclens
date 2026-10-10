@@ -1,11 +1,21 @@
+import type { SystemProfile } from "./api";
 import type { ActivityWindow } from "./activityWindow";
+import { CheckWarning } from "./CheckWarning";
 import { micros, percent } from "./format";
 
 const SHOWN = 15;
 
-export function DriversView({ win }: { win: ActivityWindow | null }) {
+/** Checks this view depends on: if any failed on this PC, its numbers may be wrong. */
+const DRIVER_CHECKS = ["etw_kernel_session", "etw_dpc_isr"];
+
+export function DriversView({ win, profile }: { win: ActivityWindow | null; profile: SystemProfile | null }) {
   if (!win) {
-    return <p className="dim" role="status">Starting the trace… the first reading takes a couple of seconds.</p>;
+    return (
+      <>
+        <CheckWarning profile={profile} ids={DRIVER_CHECKS} />
+        <p className="dim" role="status">Starting the trace… the first reading takes a couple of seconds.</p>
+      </>
+    );
   }
   const windowUs = win.seconds * 1_000_000;
   // Share of the machine's total CPU capacity (all logical CPUs together).
@@ -20,6 +30,8 @@ export function DriversView({ win }: { win: ActivityWindow | null }) {
   };
 
   return (
+    <>
+    <CheckWarning profile={profile} ids={DRIVER_CHECKS} />
     <section aria-labelledby="drv-h" className="card">
       <h2 id="drv-h">Driver CPU time</h2>
       <p className="lede">
@@ -68,5 +80,6 @@ export function DriversView({ win }: { win: ActivityWindow | null }) {
         <p className="note">{win.health.durations_dropped} readings were discarded as implausible.</p>
       )}
     </section>
+    </>
   );
 }

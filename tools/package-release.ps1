@@ -65,12 +65,31 @@ $notes = "docs\releases\v$version.md"
 if (Test-Path $notes) { Copy-Item $notes (Join-Path $stage 'RELEASE-NOTES.md') } else { Write-Warning "no $notes" }
 Run node @('tools\third-party-notices.mjs', (Join-Path $stage 'THIRD-PARTY-NOTICES.txt'))
 
-# 5. Zip (.NET, so entries use forward slashes) and checksum.
+# 5. Zip and checksum. Entries are added one by one with forward slashes: .NET Framework's
+# ZipFile.CreateFromDirectory (what Windows PowerShell 5.1 has) writes backslashes, which other
+# unzip tools turn into file names containing a literal backslash. Checked again below.
 Step 'Zipping'
+Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip = Join-Path $OutDir "$name.zip"
-if (Test-Path $zip) { Remove-Item $zip -Force }
-[IO.Compression.ZipFile]::CreateFromDirectory((Resolve-Path $stage).Path, (Join-Path (Resolve-Path $OutDir).Path "$name.zip"), 'Optimal', $true)
+if (Test-Path $zip) { [IO.File]::Delete((Resolve-Path $zip).Path) }
+$zipPath = Join-Path (Resolve-Path $OutDir).Path "$name.zip"
+$base = (Resolve-Path $stage).Path
+$fs = [IO.File]::Open($zipPath, 'Create')
+$za = New-Object IO.Compression.ZipArchive($fs, 'Create')
+foreach ($file in Get-ChildItem $base -Recurse -File) {
+    $rel = $file.FullName.Substring($base.Length + 1).Replace('\', '/')
+    $entry = $za.CreateEntry("$name/$rel", 'Optimal')
+    $dst = $entry.Open(); $src = [IO.File]::OpenRead($file.FullName)
+    $src.CopyTo($dst); $src.Dispose(); $dst.Dispose()
+}
+$za.Dispose(); $fs.Dispose()
+$check = [IO.Compression.ZipFile]::OpenRead($zipPath)
+$bad = @($check.Entries | Where-Object { $_.FullName.Contains('\') })
+$count = $check.Entries.Count
+$check.Dispose()
+if ($bad.Count -gt 0) { throw "zip has $($bad.Count) entries with backslashes in their names" }
+Write-Host "zip entries: $count, all with forward slashes"
 $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
 [IO.File]::WriteAllText((Join-Path (Resolve-Path $OutDir).Path "$name.zip.sha256"), "$hash  $name.zip`n", (New-Object Text.UTF8Encoding($false)))
 

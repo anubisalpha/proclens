@@ -1,5 +1,6 @@
 import { useState } from "react";
-import type { ProcessActivity } from "./api";
+import type { ProcessActivity, SystemProfile } from "./api";
+import { CheckWarning } from "./CheckWarning";
 import type { ActivityWindow } from "./activityWindow";
 import { bytes, micros, percent, rate, splitPath } from "./format";
 
@@ -8,10 +9,18 @@ const SHOWN = 15;
 type SortBy = "disk" | "file";
 const UNKNOWN_PID = 4294967295;
 
-export function DiskView({ win }: { win: ActivityWindow | null }) {
+/** Checks this view depends on: if any failed on this PC, its numbers may be wrong. */
+const DISK_CHECKS = ["etw_kernel_session", "etw_disk_io", "etw_file_io", "handle_table_names"];
+
+export function DiskView({ win, profile }: { win: ActivityWindow | null; profile: SystemProfile | null }) {
   const [sortBy, setSortBy] = useState<SortBy>("disk");
   if (!win) {
-    return <p className="dim" role="status">Starting the trace… the first reading takes a couple of seconds.</p>;
+    return (
+      <>
+        <CheckWarning profile={profile} ids={DISK_CHECKS} />
+        <p className="dim" role="status">Starting the trace… the first reading takes a couple of seconds.</p>
+      </>
+    );
   }
   const s = win.seconds;
   const totalRead = win.processes.reduce((n, p) => n + p.disk_read_bytes, 0);
@@ -29,6 +38,7 @@ export function DiskView({ win }: { win: ActivityWindow | null }) {
 
   return (
     <>
+      <CheckWarning profile={profile} ids={DISK_CHECKS} />
       <section aria-labelledby="disk-h" className="card">
         <h2 id="disk-h">Disk activity</h2>
         <p className="lede">

@@ -102,8 +102,8 @@ export default function App() {
                 {processes && <ProcessTable list={processes} />}
               </>
             )}
-            {tab === "disk" && <DiskView win={win} />}
-            {tab === "drivers" && <DriversView win={win} />}
+            {tab === "disk" && <DiskView win={win} profile={profile} />}
+            {tab === "drivers" && <DriversView win={win} profile={profile} />}
             {tab === "pc" && (profile ? <ProfileCard profile={profile} /> : <p className="dim">Waiting for the first reading…</p>)}
           </div>
         </>

@@ -526,6 +526,14 @@ impl TraceSession {
         iv
     }
 
+    /// Bytes (read, written) credited to `pid` at the file level in the interval being collected,
+    /// without ending it. Lets the startup self-test wait for its own events, which ETW delivers in
+    /// batches about a second late, instead of guessing a fixed delay.
+    pub fn peek_file_bytes(&self, pid: u32) -> (u64, u64) {
+        let s = self.state.lock().unwrap();
+        s.cur.file_by_pid.get(&pid).map_or((0, 0), |a| (a.read_bytes, a.write_bytes))
+    }
+
     pub fn health(&self) -> Option<SessionHealth> {
         query_session(&self.name)
     }

@@ -1,4 +1,5 @@
 import type { CapabilityStatus, SystemProfile, Verification } from "./api";
+import { capabilityName } from "./capabilities";
 
 const VERIFICATION: Record<Verification, { label: string; detail: string; tone: string }> = {
   exact: {
@@ -15,27 +16,17 @@ const VERIFICATION: Record<Verification, { label: string; detail: string; tone: 
   untested: {
     label: "Untested Windows build",
     detail:
-      "ProcLens has no profile for this build. Anything that fails its live check is switched off instead of guessing.",
+      "ProcLens has no profile for this build. Its live checks below show what works here; a failed check means that part may be wrong.",
     tone: "wait",
   },
 };
 
 const STATUS: Record<CapabilityStatus, string> = {
   ok: "Working",
-  failed: "Switched off",
+  failed: "Check failed",
   not_run: "Not checked",
 };
 
-const NAMES: Record<string, string> = {
-  process_list: "Process list",
-  memory_counters: "Memory totals",
-  memory_lists: "Memory breakdown (in use / cache / free)",
-  handle_table_names: "Names of files opened before tracing",
-  etw_kernel_session: "Kernel event tracing",
-  etw_disk_io: "Disk activity tracing",
-  etw_file_io: "File activity tracing",
-  etw_dpc_isr: "Driver CPU time tracing",
-};
 
 export function ProfileCard({ profile }: { profile: SystemProfile }) {
   const { os } = profile;
@@ -54,7 +45,7 @@ export function ProfileCard({ profile }: { profile: SystemProfile }) {
         <tbody>
           {profile.capabilities.map((c) => (
             <tr key={c.id}>
-              <th scope="row">{NAMES[c.id] ?? c.id}</th>
+              <th scope="row">{capabilityName(c.id)}</th>
               <td className={`cap cap-${c.status}`}>{STATUS[c.status]}</td>
               <td className="dim hint">
                 {c.detail}

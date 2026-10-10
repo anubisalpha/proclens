@@ -212,7 +212,7 @@ pub enum Verification {
 pub enum CapabilityStatus {
     /// Self-test passed on this machine just now.
     Ok,
-    /// Self-test ran and failed: the feature is switched off rather than showing wrong data.
+    /// Self-test ran and failed. It is shown on the This PC tab and as a warning on the affected view;\n    /// only the memory breakdown also turns itself off. Treat a failed check as a reason to distrust\n    /// that feature's numbers.
     Failed,
     /// Not checked at startup (e.g. needs a trace session that isn't running).
     NotRun,

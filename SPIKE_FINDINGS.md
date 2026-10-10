@@ -11,7 +11,7 @@ not "works on every Windows box". That is why per-build profiles exist (see READ
   service is a possible later swap (the pipe interface doesn't assume how the collector started).
 - **Collector is read-only**; the only mutating request is `Shutdown` (stops the collector itself).
 - **Per-build profiles + runtime self-tests** (user request): support is tracked per exact Windows
-  build and patch level, and a failed self-test switches a feature off instead of showing wrong data.
+  build and patch level, and a failed self-test is reported on the This PC tab and as a warning on the affected view (only the memory breakdown also turns itself off per sample; the trace views keep running).
 - Kernel driver (hidden-process detection) deferred; we only see what Windows itself reports.
 
 ## What is verified
