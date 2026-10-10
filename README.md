@@ -26,15 +26,22 @@ its notes first: this is a beta, verified on one PC only. Compare the file's SHA
 `.sha256` file.
 
 - **`proclens-<version>-windows-x64-setup.exe` (recommended).** Asks for administrator approval and
-  installs for all users to `C:\Program Files\ProcLens`, with a Start menu entry, an optional desktop
-  shortcut and an uninstaller under Apps & features. There is deliberately no per-user install: the
+  installs for all users to `C:\Program Files\ProcLens`, with a ProcLens folder in the Start menu
+  (ProcLens, README, Release notes, Check this PC (discover), Uninstall), a desktop shortcut
+  (ticked by default; untick it to skip) and an uninstaller under Apps & features. There is deliberately no per-user install: the
   app starts `collector.exe` from its own folder with administrator rights, so that folder must not be
-  writable by ordinary programs. The uninstaller asks you to close ProcLens first if it is open (setup is configured the same way but that has not been tested).
+  writable by ordinary programs. Setup and the uninstaller ask you to close ProcLens first if it is open.
 - **`proclens-<version>-windows-x64.zip` (portable).** Extract it somewhere only administrators can
   write (for example under Program Files) for the same reason.
 
 Both are unsigned, so SmartScreen will warn. Needs the Microsoft Edge WebView2 runtime (normally
 already installed). Start `proclens-app.exe`, click **Start collector**, and approve the UAC prompt.
+
+The strip at the bottom of the window has a link to this project and a **Check for updates** button.
+The check runs only when clicked: it reads GitHub's public release list over HTTPS (through Windows'
+own WinHTTP, with the system's TLS and proxy settings), including pre-releases, and links to the newest
+release if it is newer than the running version. It never downloads or installs anything, and it is the
+app's only network access.
 
 ## Build and run
 
@@ -58,8 +65,10 @@ cargo test --workspace                       # protocol framing, profile matchin
 
 ## Checking your own PC: `profile` and `discover`
 
-The collector has two diagnostic commands that need no UI. On an installed copy run them from
-`C:\Program Files\ProcLens`; from a source checkout use `.\target\release\collector.exe`.
+The collector has two diagnostic commands that need no UI. On an installed copy, the Start menu's
+**ProcLens > Check this PC (discover)** runs `discover` for you (one UAC prompt, window stays open).
+Otherwise run them from `C:\Program Files\ProcLens`; from a source checkout use
+`.\target\release\collector.exe`.
 
 ```powershell
 & "C:\Program Files\ProcLens\collector.exe" profile    # normal PowerShell is fine
@@ -109,6 +118,12 @@ missing), and writes `dist\proclens-<version>-windows-x64.zip` and
 [`installer/proclens.iss`](installer/proclens.iss). The app holds a named mutex (`ProcLens-App-Running`)
 while it runs, which is how setup and the uninstaller detect it; the name must match `AppMutex` in
 that script. Release notes live in [`docs/releases/`](docs/releases/).
+
+## FAQ
+
+[`docs/FAQ.md`](docs/FAQ.md) covers the questions that came up while testing: a failed built-in check
+while data is still arriving, why administrator approval and Program Files are needed, SmartScreen,
+network access, and uninstall leftovers.
 
 ## References
 

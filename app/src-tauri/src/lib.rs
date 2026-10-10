@@ -4,6 +4,8 @@
 //! One thread owns the pipe connection. It forwards collector data to the web UI as events and
 //! carries UI commands (subscribe, shutdown) to the collector.
 
+mod update;
+
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Mutex};
@@ -218,7 +220,15 @@ pub fn run() {
             busy: AtomicBool::new(false),
             launched_by_us: AtomicBool::new(false),
         })
-        .invoke_handler(tauri::generate_handler![get_status, start_collector, stop_collector, set_activity])
+        .invoke_handler(tauri::generate_handler![
+            get_status,
+            start_collector,
+            stop_collector,
+            set_activity,
+            update::check_for_update,
+            update::open_project_page,
+            update::open_release_page
+        ])
         .setup(|app| {
             // If a collector is already running (started by hand), attach silently.
             let _ = spawn_link(app.handle(), false);

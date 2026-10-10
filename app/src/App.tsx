@@ -3,6 +3,7 @@ import { useCollector } from "./api";
 import { windowOf } from "./activityWindow";
 import { DiskView } from "./DiskView";
 import { DriversView } from "./DriversView";
+import { Footer } from "./Footer";
 import { MemoryView } from "./MemoryView";
 import { ProcessTable } from "./ProcessTable";
 import { ProfileCard } from "./ProfileCard";
@@ -108,6 +109,8 @@ export default function App() {
           </div>
         </>
       )}
+
+      <Footer />
     </main>
   );
 }

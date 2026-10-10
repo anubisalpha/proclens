@@ -1,6 +1,6 @@
 [package]
 name = "proclens-app"
-version = "0.1.0-beta.1"
+version = "0.1.0-beta.2"
 description = "ProcLens: see what your PC is really running"
 authors = ["Anubis Productions"]
 edition = "2021"
@@ -28,4 +28,11 @@ serde_json = "1"
 
 [target.'cfg(windows)'.dependencies.windows]
 version = "0.62"
-features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"]
+features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinHttp",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+]

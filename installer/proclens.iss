@@ -46,7 +46,7 @@ RestartApplications=no
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
+Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional shortcuts:"
 
 [Files]
 Source: "{#StageDir}\proclens-app.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -56,9 +56,22 @@ Source: "{#StageDir}\ferrisetw-LICENSE.md"; DestDir: "{app}"; Flags: ignoreversi
 Source: "{#StageDir}\THIRD-PARTY-NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#StageDir}\RELEASE-NOTES.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#RepoRoot}\installer\run-discover.ps1"; DestDir: "{app}"; Flags: ignoreversion
+
+[InstallDelete]
+; 0.1.0-beta.1 put a single ProcLens shortcut directly in the Start menu; it now lives in a folder.
+Type: files; Name: "{autoprograms}\ProcLens.lnk"
 
 [Icons]
-Name: "{autoprograms}\ProcLens"; Filename: "{app}\proclens-app.exe"
+; {group} is Start menu\Programs\ProcLens (DefaultGroupName; the group page is disabled).
+Name: "{group}\ProcLens"; Filename: "{app}\proclens-app.exe"
+; Notepad rather than the .md file association, which may not exist.
+Name: "{group}\README"; Filename: "{sys}\notepad.exe"; Parameters: """{app}\README.md"""
+Name: "{group}\Release notes"; Filename: "{sys}\notepad.exe"; Parameters: """{app}\RELEASE-NOTES.md"""
+; discover needs administrator rights; the script asks for them (one UAC prompt) and keeps its
+; window open so the output can be read and copied.
+Name: "{group}\Check this PC (discover)"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\run-discover.ps1"""; WorkingDir: "{app}"; IconFilename: "{app}\collector.exe"; Comment: "Compare this Windows build's ETW event tables with ProcLens's profile"
+Name: "{group}\Uninstall ProcLens"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\ProcLens"; Filename: "{app}\proclens-app.exe"; Tasks: desktopicon
 
 [Run]
