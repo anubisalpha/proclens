@@ -31,6 +31,8 @@ The app looks for `collector.exe` next to itself (override with `PROCLENS_COLLEC
 ```powershell
 cargo test --workspace                       # protocol framing, profile matching
 .\target\release\collector.exe profile       # this PC's Windows build, matched profile, self-tests
+.\target\release\collector.exe discover      # (elevated) derive the ETW tables from live events and compare with the profile
+.\target\release\collector.exe discover --emit draft.json   # also write the discovered `etw` section as a draft profile
 .\target\release\collector.exe mem|procs     # quick data dumps (mem's page lists need admin)
 .\tools\run-elevated.ps1 -Seconds 15 -Out <prefix> -MarkerDir <dir>   # ETW spike with known workloads
 ```
@@ -47,9 +49,19 @@ tracked per build rather than assumed.
   Windows update. The UI shows the result ("Verified build" / "Same build, different patch level"
   / "Untested Windows build").
 
+A profile also carries the build's ETW event tables (`etw` section: opcodes, kernel provider
+flags, paging-I/O mask, disk-latency tick length). They are data, not code, and are validated at
+startup and in `cargo test`.
+
 To support another PC: run `collector profile` there, check the self-tests, repeat the ETW
 checks (`tools/run-elevated.ps1`, comparing against Windows' own counters as in
 `SPIKE_FINDINGS.md`), then add a profile JSON and register it in `collector/src/profile.rs`.
+
+## References
+
+[`docs/REFERENCES.md`](docs/REFERENCES.md) records every Microsoft page and other source the
+project relies on, how far each was checked, and where the documentation and our measurements
+disagree. [`SPIKE_FINDINGS.md`](SPIKE_FINDINGS.md) has the test results and gotchas.
 
 ## License
 

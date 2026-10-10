@@ -75,7 +75,8 @@ pub enum Response {
 pub struct MemoryStats {
     pub physical_total: u64,
     pub physical_available: u64,
-    /// File cache (overlaps with standby/modified; it is a view, not a partition).
+    /// Microsoft: "the size of the standby list plus the system working set". It overlaps the
+    /// page lists below, so it is a view, not a partition.
     pub system_cache: u64,
     pub kernel_nonpaged: u64,
     /// Virtual size of paged pool; not all of it is resident.

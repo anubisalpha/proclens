@@ -5,9 +5,11 @@
 //!   etw [seconds]              kernel trace spike (run elevated)
 
 mod activity;
+mod discover;
 mod etw;
 mod files;
 mod mem;
+mod params;
 mod pipe;
 mod procs;
 mod profile;
@@ -35,6 +37,12 @@ fn main() {
             std::process::exit(serve::run(idle));
         }
         Some("profile") => profile::run(),
+        Some("discover") => {
+            // discover [--emit FILE]: derive this build's ETW tables from live events and compare
+            // them with the profile (needs an elevated process).
+            let emit = args.iter().position(|a| a == "--emit").and_then(|i| args.get(i + 1)).map(std::path::PathBuf::from);
+            discover::run(emit);
+        }
         Some("mem") => mem::run(),
         Some("procs") => procs::run(),
         Some("etw") => {

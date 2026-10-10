@@ -2,7 +2,8 @@
 //! were opened before the trace started, by finding a handle that points at the object and asking
 //! Windows for that handle's final path.
 //!
-//! Risks handled: querying some handles (e.g. synchronous pipes) can block forever, so every query
+//! Risks handled: querying some handles (e.g. synchronous pipes) is widely reported to block
+//! forever (Microsoft's GetFileType/GetFinalPathNameByHandle pages don't warn about it), so every query
 //! runs on a throwaway thread with a timeout; only disk-type handles are queried.
 
 use std::collections::{HashMap, HashSet};

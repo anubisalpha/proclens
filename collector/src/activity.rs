@@ -13,11 +13,6 @@ const MAX_PROCESSES: usize = 100;
 const MAX_FILES: usize = 60;
 const MAX_DRIVERS: usize = 30;
 
-/// Unit of the disk event's `HighResResponseTime`. I believe it is 100 ns; that coincides with a
-/// QPC tick on the verified build (QPC = 10 MHz), so this machine can't tell the two apart.
-/// Treat disk latency as approximate until checked on a machine with a different QPC rate.
-const RESPONSE_TICK_US: f64 = 0.1;
-
 /// `(\Device\HarddiskVolume3, C:)` for every mounted drive letter.
 pub fn volume_map() -> Vec<(String, String)> {
     let mut out = Vec::new();
@@ -61,6 +56,8 @@ pub fn build(
     drivers: &[(usize, String)],
     volumes: &[(String, String)],
 ) -> ActivitySnapshot {
+    // DPC/ISR durations and the disk event's HighResResponseTime are both in QPC ticks
+    // (Microsoft documents the latter as KeQueryPerformanceCounter units).
     let to_us = |ticks: f64| ticks * 1_000_000.0 / qpc_freq.max(1) as f64;
 
     // --- processes: union of disk and file activity ---
@@ -83,7 +80,7 @@ pub fn build(
                 disk_ops: d.map_or(0, |a| a.reads + a.writes),
                 disk_latency_us: d
                     .filter(|a| a.resp_count > 0)
-                    .map(|a| a.resp_ticks as f64 / a.resp_count as f64 * RESPONSE_TICK_US),
+                    .map(|a| to_us(a.resp_ticks as f64 / a.resp_count as f64)),
                 file_read_bytes: f.map_or(0, |a| a.read_bytes),
                 file_write_bytes: f.map_or(0, |a| a.write_bytes),
                 file_ops: f.map_or(0, |a| a.reads + a.writes),
@@ -188,8 +185,12 @@ mod tests {
         assert_eq!(s.processes.len(), 2);
         let a = s.processes.iter().find(|p| p.pid == 10).unwrap();
         assert_eq!((a.disk_read_bytes, a.file_write_bytes), (4096, 100));
-        // 400 ticks over 2 requests = 200 ticks = 20 us at 100 ns per tick
+        // 400 ticks over 2 requests = 200 ticks = 20 us at a 10 MHz counter
         assert!((a.disk_latency_us.unwrap() - 20.0).abs() < 1e-9);
+        // The same ticks on a 3 MHz counter are a different time: latency must follow the counter.
+        let slow = build(&iv, &names, None, 3_000_000, &[], &[]);
+        let a = slow.processes.iter().find(|p| p.pid == 10).unwrap();
+        assert!((a.disk_latency_us.unwrap() - 200.0 * 1e6 / 3e6).abs() < 1e-9);
         assert_eq!(s.processes.iter().find(|p| p.pid == 11).unwrap().name, "(exited)");
         assert_eq!(s.health.unresolved_file_bytes, 7);
     }

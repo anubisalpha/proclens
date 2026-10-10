@@ -8,4 +8,7 @@ Copied unmodified from crates.io, then patched:
   Needed to compute DPC/ISR durations (`raw_timestamp - InitialTime`). `EventRecord::timestamp()` is
   invalid with this patch.
 
+- `src/schema.rs`: added `Schema::property_names()`, a public accessor for the event's field names
+  (upstream keeps `properties()` crate-private). Used by `collector discover`.
+
 To re-apply on a new upstream version, diff against the crates.io tarball.

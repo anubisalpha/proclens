@@ -1,7 +1,8 @@
 //! A kernel ETW trace session that accumulates activity and hands it out one interval at a time.
 //!
-//! Everything about event layout here is specific to a Windows build and was verified on the build
-//! recorded in `profiles/` (see `windows-10-19045.json` for the opcode tables and quirks).
+//! Event layout is specific to a Windows build. Opcodes, provider flags and a few numeric facts
+//! come from the build's profile (`profiles/*.json`, section `etw`, loaded as [`EtwParams`]);
+//! only the event *field names* are fixed in this file.
 //!
 //! State is split in two: *persistent* state that must survive between intervals (thread-to-pid
 //! map, file names, in-flight I/O requests) and the *interval* aggregates, which
@@ -29,6 +30,7 @@ use windows::Win32::System::Performance::QueryPerformanceFrequency;
 use windows::Win32::System::ProcessStatus::{EnumDeviceDrivers, GetDeviceDriverBaseNameW};
 
 use crate::files;
+use crate::params::EtwParams;
 
 /// Bytes with no identifiable file are reported under this name.
 pub const UNRESOLVED: &str = "(file not identified: opened before the trace, handle gone or unreadable)";
@@ -95,11 +97,6 @@ struct PendingIo {
     paging: bool,
 }
 
-/// NTSTATUS for "read past the end of the file". Normal at the end of every sequential read.
-const STATUS_END_OF_FILE: u32 = 0xC000_0011;
-const IRP_PAGING_IO: u32 = 0x0000_0002;
-const IRP_SYNCHRONOUS_PAGING_IO: u32 = 0x0000_0040;
-
 #[derive(Default)]
 struct State {
     // --- persistent across intervals ---
@@ -135,17 +132,19 @@ impl State {
     }
 }
 
+/// `params` holds this Windows build's opcodes and flags (from the profile JSON).
 fn handler(
     state: Arc<Mutex<State>>,
     kind: Kind,
+    params: Arc<EtwParams>,
 ) -> impl FnMut(&EventRecord, &SchemaLocator) + Send + Sync + 'static {
     move |record, locator| {
         let opcode = record.opcode();
         let wanted = match kind {
-            Kind::Thread => matches!(opcode, 1 | 3),
-            Kind::FileIo => matches!(opcode, 0 | 32 | 35 | 36 | 64 | 66 | 67 | 68 | 76),
-            Kind::DiskIo => matches!(opcode, 10 | 11),
-            Kind::PerfInfo => matches!(opcode, 50 | 66..=69),
+            Kind::Thread => params.thread_wants(opcode),
+            Kind::FileIo => params.file_wants(opcode),
+            Kind::DiskIo => params.disk_wants(opcode),
+            Kind::PerfInfo => params.perf_wants(opcode),
         };
         // Schema lookups (TDH) are costly at ~100k events/s: only do them for events we parse,
         // plus once per (kind, opcode) to learn its name for diagnostics.
@@ -195,8 +194,9 @@ fn handler(
                     s.tid_to_pid.insert(tid, pid);
                 }
             }
+            // The opcode sets are disjoint (checked by EtwParams::validate), so guard order is moot.
             Kind::FileIo => match opcode {
-                0 | 32 | 35 | 36 => {
+                op if params.file.name_opcodes.contains(&op) => {
                     // Name events: never observed in a live session on the verified build, but
                     // harmless if another build sends them.
                     if let (Some(obj), Some(name)) = (field!(Pointer, "FileObject"), field!(String, "FileName")) {
@@ -204,14 +204,14 @@ fn handler(
                     }
                 }
                 // Close: the kernel recycles FileObject addresses, so settle and forget the object.
-                66 => {
+                op if op == params.file.close_opcode => {
                     if let Some(obj) = field!(Pointer, "FileObject") {
                         s.flush_obj(*obj);
                         s.file_names.remove(&*obj);
                         s.resolve_tried.remove(&*obj);
                     }
                 }
-                64 => {
+                op if op == params.file.create_opcode => {
                     if let (Some(obj), Some(name)) = (field!(Pointer, "FileObject"), field!(String, "OpenPath")) {
                         s.flush_obj(*obj); // leftovers belong to a previous incarnation of this address
                         s.resolve_tried.remove(&*obj);
@@ -220,7 +220,7 @@ fn handler(
                     }
                 }
                 // Read/Write request: remember it. IoSize is only what the caller *asked* for.
-                67 | 68 => {
+                op if op == params.file.read_opcode || op == params.file.write_opcode => {
                     let requested = field!(u32, "IoSize").unwrap_or(0) as u64;
                     let io_flags = field!(u32, "IoFlags").unwrap_or(0);
                     if let (Some(irp), Some(obj)) = (field!(Pointer, "IrpPtr"), field!(Pointer, "FileObject")) {
@@ -232,15 +232,15 @@ fn handler(
                             PendingIo {
                                 pid: record.process_id(),
                                 obj: *obj,
-                                read: opcode == 67,
+                                read: opcode == params.file.read_opcode,
                                 requested,
-                                paging: io_flags & (IRP_PAGING_IO | IRP_SYNCHRONOUS_PAGING_IO) != 0,
+                                paging: params.is_paging(io_flags),
                             },
                         );
                     }
                 }
                 // OperationEnd: ExtraInfo is the number of bytes actually transferred.
-                76 => {
+                op if op == params.file.operation_end_opcode => {
                     if let Some(irp) = field!(Pointer, "IrpPtr") {
                         match s.pending_io.remove(&*irp) {
                             None => s.cur.io_unmatched_end += 1,
@@ -249,7 +249,8 @@ fn handler(
                                 let actual = if status == 0 {
                                     field!(Pointer, "ExtraInfo").map(|v| *v as u64).unwrap_or(0)
                                 } else {
-                                    if status != STATUS_END_OF_FILE {
+                                    // End-of-file is how every sequential read ends; not a failure.
+                                    if status != params.file.end_of_file_ntstatus.0 {
                                         s.cur.io_failed += 1;
                                     }
                                     0
@@ -295,7 +296,7 @@ fn handler(
                 let agg = s.cur.disk_by_pid.entry(pid).or_default();
                 agg.resp_ticks += resp;
                 agg.resp_count += 1;
-                if opcode == 10 {
+                if opcode == params.disk.read_opcode {
                     agg.reads += 1;
                     agg.read_bytes += size;
                 } else {
@@ -304,7 +305,7 @@ fn handler(
                 }
             }
             Kind::PerfInfo => {
-                // 50 = ISR-MSI and 67 = ISR; 66 ThreadedDPC, 68 DPC, 69 TimerDPC
+                // Which opcodes are DPCs and which are ISRs comes from the profile.
                 let init = field!(u64, "InitialTime");
                 let routine = field!(Pointer, "Routine");
                 if let (Some(init), Some(routine)) = (init, routine) {
@@ -318,7 +319,7 @@ fn handler(
                         // e.g. InitialTime = 0 yields "time since boot"
                         st.cur.dur_implausible += 1;
                     } else {
-                        let map = if matches!(opcode, 50 | 67) {
+                        let map = if params.is_isr(opcode) {
                             &mut st.cur.isr_by_routine
                         } else {
                             &mut st.cur.dpc_by_routine
@@ -427,7 +428,8 @@ pub struct TraceSession {
 impl TraceSession {
     /// Starts a kernel session called `name` (stopping a stale one of the same name first).
     /// Needs an elevated process.
-    pub fn start(name: &str) -> Result<Self, String> {
+    pub fn start(name: &str, params: Arc<EtwParams>) -> Result<Self, String> {
+        params.validate().map_err(|e| format!("invalid ETW parameters: {e}"))?;
         let mut qpc_freq = 0i64;
         let _ = unsafe { QueryPerformanceFrequency(&mut qpc_freq) };
         let qpc_freq = qpc_freq.max(1);
@@ -441,21 +443,22 @@ impl TraceSession {
         }
 
         let thread = Provider::kernel(&kernel_providers::THREAD_PROVIDER)
-            .add_callback(handler(state.clone(), Kind::Thread))
+            .add_callback(handler(state.clone(), Kind::Thread, params.clone()))
             .build();
-        // File events come from three flags: FILE_IO (completions, op76), FILE_IO_INIT (the
-        // read/write requests) and DISK_FILE_IO; one provider on the FileIo GUID, flags ORed.
-        let file_def = KernelProvider::new(
-            kernel_providers::FILE_IO_PROVIDER.guid,
-            0x0200_0000 | 0x0400_0000 | 0x0000_0200,
-        );
-        let file = Provider::kernel(&file_def).add_callback(handler(state.clone(), Kind::FileIo)).build();
+        // File events come from several flags (see the profile's file.flags); one provider on the
+        // FileIo GUID with them ORed together.
+        let file_def = KernelProvider::new(kernel_providers::FILE_IO_PROVIDER.guid, params.file_flags());
+        let file = Provider::kernel(&file_def)
+            .add_callback(handler(state.clone(), Kind::FileIo, params.clone()))
+            .build();
         let disk = Provider::kernel(&kernel_providers::DISK_IO_PROVIDER)
-            .add_callback(handler(state.clone(), Kind::DiskIo))
+            .add_callback(handler(state.clone(), Kind::DiskIo, params.clone()))
             .build();
-        // DPC and ISR share the PerfInfo GUID; OR their flags (DPC 0x20 | INTERRUPT 0x40).
-        let perf_def = KernelProvider::new(kernel_providers::DPC_PROVIDER.guid, 0x20 | 0x40);
-        let perf = Provider::kernel(&perf_def).add_callback(handler(state.clone(), Kind::PerfInfo)).build();
+        // DPC and ISR share the PerfInfo GUID; their flags (perf.flags) are ORed into one provider.
+        let perf_def = KernelProvider::new(kernel_providers::DPC_PROVIDER.guid, params.perf_flags());
+        let perf = Provider::kernel(&perf_def)
+            .add_callback(handler(state.clone(), Kind::PerfInfo, params.clone()))
+            .build();
 
         // A crashed earlier run leaves its session alive (and the name taken); clear it first.
         let _ = ferrisetw::trace::stop_trace_by_name(name);

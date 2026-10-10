@@ -7,8 +7,12 @@
 //! - **Self-tests** (this module): what provably works on *this* machine *right now*. A failed
 //!   test switches the feature off instead of showing wrong numbers, even on a build with no profile.
 
+use std::sync::{Arc, OnceLock};
+
 use proclens_proto::{Capability, CapabilityStatus, OsInfo, SystemProfile, Verification};
 use serde::Deserialize;
+
+use crate::params::EtwParams;
 use windows::core::{w, PCWSTR};
 use windows::Win32::System::Registry::{
     RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RRF_RT_REG_SZ,
@@ -25,9 +29,8 @@ pub struct KnownProfile {
     pub os: ProfileOs,
     pub verified: ProfileVerified,
     pub verified_capabilities: Vec<String>,
-    /// Build-specific trace parameters; kept as data so the ETW code can move to them.
-    #[allow(dead_code)]
-    pub etw: serde_json::Value,
+    /// Build-specific trace parameters (opcodes, provider flags, ...) used by `trace.rs`.
+    pub etw: EtwParams,
     pub quirks: Vec<String>,
 }
 
@@ -98,7 +101,9 @@ fn reg_dword(value: PCWSTR) -> u32 {
 }
 
 pub fn os_info() -> OsInfo {
-    // RtlGetVersion, unlike GetVersionEx, isn't subject to manifest-based version lying.
+    // RtlGetVersion is the documented equivalent of GetVersionEx (see docs/REFERENCES.md). It is
+    // commonly used because GetVersionEx can be shimmed by an app manifest; Microsoft's page does
+    // not say that, so the check here is empirical: the build it reports matches the registry's.
     let mut v = OsVersionInfoW { size: std::mem::size_of::<OsVersionInfoW>() as u32, major: 0, minor: 0, build: 0, platform: 0, csd: [0; 128] };
     unsafe { RtlGetVersion(&mut v) };
     OsInfo {
@@ -117,6 +122,42 @@ fn known_profiles() -> Vec<KnownProfile> {
         .iter()
         .map(|s| serde_json::from_str(s).expect("built-in profile JSON is malformed"))
         .collect()
+}
+
+/// The ETW parameters to trace this machine with, and where they came from.
+pub struct EtwSelection {
+    pub params: Arc<EtwParams>,
+    /// For humans: "windows-10-19045 (exact match)" or "... (best guess: no profile for build N)".
+    pub source: String,
+}
+
+/// Chooses ETW parameters for `os`: the matching profile's, or, if the build has no profile, the
+/// first built-in profile's as a best guess. A wrong guess is caught by the startup self-tests
+/// (parse failures, implausible totals), which switch the affected feature off.
+fn select_etw(os: &OsInfo) -> EtwSelection {
+    let (verification, profile) = find_profile(os);
+    let (profile, how) = match (profile, verification) {
+        (Some(p), Verification::Exact) => (p, "exact match".to_string()),
+        (Some(p), _) => {
+            let how = format!("same build, other patch level ({} vs verified {})", os.ubr, p.verified.ubr);
+            (p, how)
+        }
+        (None, _) => {
+            let p = known_profiles().into_iter().next().expect("at least one built-in profile");
+            (p, format!("best guess: no profile for build {}", os.build))
+        }
+    };
+    if let Err(e) = profile.etw.validate() {
+        // Built-in profiles are checked in tests, so this only fires if a test was skipped.
+        panic!("profile {} has invalid etw parameters: {e}", profile.id);
+    }
+    EtwSelection { source: format!("{} ({how})", profile.id), params: Arc::new(profile.etw) }
+}
+
+/// ETW parameters for the machine we're running on (computed once).
+pub fn etw_selection() -> &'static EtwSelection {
+    static SELECTION: OnceLock<EtwSelection> = OnceLock::new();
+    SELECTION.get_or_init(|| select_etw(&os_info()))
 }
 
 fn find_profile(os: &OsInfo) -> (Verification, Option<KnownProfile>) {
@@ -165,7 +206,8 @@ fn etw_checks(profile: &Option<KnownProfile>) -> Vec<Capability> {
     const MIB: usize = 1 << 20;
     const CHUNKS: usize = 8;
 
-    let session = match crate::trace::TraceSession::start("ProcLensSelfTest") {
+    let selection = etw_selection();
+    let session = match crate::trace::TraceSession::start("ProcLensSelfTest", selection.params.clone()) {
         Ok(s) => s,
         Err(e) => return ETW_IDS.iter().map(|id| check(id, profile, Err(e.clone()))).collect(),
     };
@@ -203,7 +245,9 @@ fn etw_checks(profile: &Option<KnownProfile>) -> Vec<Capability> {
     let want = (CHUNKS * MIB) as u64;
 
     let session_check = match &health {
-        Some(h) if h.events_lost == 0 => Ok(format!("session ran; {} events lost", h.events_lost)),
+        Some(h) if h.events_lost == 0 => {
+            Ok(format!("session ran; {} events lost; event tables from {}", h.events_lost, selection.source))
+        }
         Some(h) => Err(format!("{} events lost during a 2 s test", h.events_lost)),
         None => Err("session started but its counters could not be read".to_string()),
     };
@@ -380,6 +424,43 @@ mod tests {
 
     fn os(build: u32, ubr: u32) -> OsInfo {
         OsInfo { major: 10, minor: 0, build, ubr, arch: "x86_64".into(), display_version: String::new(), edition: String::new() }
+    }
+
+    #[test]
+    fn every_built_in_profile_has_valid_etw_parameters() {
+        for p in known_profiles() {
+            p.etw.validate().unwrap_or_else(|e| panic!("{}: {e}", p.id));
+        }
+    }
+
+    /// Guards the move from hard-coded constants to the profile: the 19045 profile must yield the
+    /// same opcode tables and masks the verified code used, or live behaviour has silently changed.
+    #[test]
+    fn the_19045_profile_matches_the_values_verified_on_that_build() {
+        let p = known_profiles().into_iter().find(|p| p.id == "windows-10-19045").unwrap().etw;
+        assert_eq!(p.file_flags(), 0x0200_0000 | 0x0400_0000 | 0x0000_0200);
+        assert_eq!(p.perf_flags(), 0x20 | 0x40);
+        assert_eq!(p.thread.start_opcodes, vec![1, 3]);
+        assert_eq!(p.file.name_opcodes, vec![0, 32, 35, 36]);
+        assert_eq!(
+            (p.file.create_opcode, p.file.close_opcode, p.file.read_opcode, p.file.write_opcode, p.file.operation_end_opcode),
+            (64, 66, 67, 68, 76)
+        );
+        assert_eq!((p.disk.read_opcode, p.disk.write_opcode), (10, 11));
+        assert_eq!(p.perf.dpc_opcodes, vec![66, 68, 69]);
+        assert_eq!(p.perf.isr_opcodes, vec![50, 67]);
+        assert_eq!(p.file.paging_io_flags.0, 0x2 | 0x40);
+        assert_eq!(p.file.end_of_file_ntstatus.0, 0xC000_0011);
+    }
+
+    #[test]
+    fn unprofiled_builds_fall_back_to_a_guess_and_say_so() {
+        let sel = select_etw(&os(99999, 1));
+        assert!(sel.source.contains("best guess"), "{}", sel.source);
+        let sel = select_etw(&os(19045, 7725));
+        assert!(sel.source.contains("exact match"), "{}", sel.source);
+        let sel = select_etw(&os(19045, 1));
+        assert!(sel.source.contains("other patch"), "{}", sel.source);
     }
 
     #[test]

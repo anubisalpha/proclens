@@ -111,7 +111,9 @@ fn acquire_trace(shared: &Arc<Shared>) -> Result<(), String> {
         if !is_elevated() {
             return Err("the kernel trace needs an elevated collector".into());
         }
-        let session = Arc::new(TraceSession::start("ProcLensTrace")?);
+        let selection = crate::profile::etw_selection();
+        eprintln!("trace: event tables from {}", selection.source);
+        let session = Arc::new(TraceSession::start("ProcLensTrace", selection.params.clone())?);
         let stop = Arc::new(AtomicBool::new(false));
         let ticker = {
             let (shared, session, stop) = (shared.clone(), session.clone(), stop.clone());
@@ -187,7 +189,14 @@ fn tick_loop(shared: Arc<Shared>, session: Arc<TraceSession>, stop: Arc<AtomicBo
         let names: HashMap<u32, String> =
             shared.sampler.processes().processes.into_iter().map(|p| (p.pid, p.name)).collect();
         // Drivers can load at any time, so rebuild these each interval (both are cheap).
-        let snap = activity::build(&iv, &names, health.as_ref(), session.qpc_freq, &driver_table(), &activity::volume_map());
+        let snap = activity::build(
+            &iv,
+            &names,
+            health.as_ref(),
+            session.qpc_freq,
+            &driver_table(),
+            &activity::volume_map(),
+        );
         let mut h = shared.hub.inner.lock().unwrap();
         h.latest = Some(Arc::new(snap));
         h.seq += 1;

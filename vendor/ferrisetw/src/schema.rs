@@ -94,6 +94,12 @@ impl Schema {
         self.te_info.opcode_name()
     }
 
+    /// PROCLENS PATCH: names of the event's properties (fields) as TDH reports them, so
+    /// `collector discover` can check which fields a Windows build actually provides.
+    pub fn property_names(&self) -> Vec<String> {
+        self.properties().iter().map(|p| p.name.clone()).collect()
+    }
+
     /// Parses the list of properties of the wrapped `TRACE_EVENT_INFO`
     ///
     /// This is parsed on first call, and cached for later use

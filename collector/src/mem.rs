@@ -175,7 +175,7 @@ pub fn run() {
     println!("== Memory ==");
     println!("Physical total      {:>10.0} MB", mb(m.physical_total));
     println!("Physical available  {:>10.0} MB", mb(m.physical_available));
-    println!("System cache        {:>10.0} MB  (a view over standby+modified, not additive)", mb(m.system_cache));
+    println!("System cache        {:>10.0} MB  (standby list + system working set; overlaps other rows)", mb(m.system_cache));
     println!("Kernel nonpaged     {:>10.0} MB", mb(m.kernel_nonpaged));
     println!("Kernel paged        {:>10.0} MB  (virtual; not all resident)", mb(m.kernel_paged));
     println!("Commit total/limit  {:>10.0} / {:.0} MB", mb(m.commit_total), mb(m.commit_limit));

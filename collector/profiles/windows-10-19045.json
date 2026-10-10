@@ -18,24 +18,48 @@
     "handle_table_names"
   ],
   "etw": {
-    "session_flags_note": "One kernel session; flags ORed: PROCESS|THREAD via Thread provider, FILE_IO 0x02000000 | FILE_IO_INIT 0x04000000 | DISK_FILE_IO 0x200, DISK_IO, DPC 0x20 | INTERRUPT 0x40",
-    "needs_raw_timestamps": true,
-    "dpc_opcodes": [66, 68, 69],
-    "isr_opcodes": [67, 50],
-    "isr_opcode_50_name": "ISR-MSI (message-signalled interrupts: GPU, NIC, NVMe)",
-    "file_read_write_opcodes": [67, 68],
-    "file_operation_end_opcode": 76,
-    "file_create_opcode": 64,
-    "file_close_opcode": 66,
-    "disk_read_write_opcodes": [10, 11],
-    "thread_rundown_opcode": 3,
-    "file_read_write_fields": ["IrpPtr", "FileObject", "IoSize", "IoFlags"],
-    "paging_io_flags": { "IRP_PAGING_IO": 2, "IRP_SYNCHRONOUS_PAGING_IO": 64 },
-    "end_of_file_ntstatus": "0xC0000011",
-    "disk_response_time_unit_assumed": "100 ns (equal to a QPC tick on this machine; latencies of 70-260 us on SATA SSD look plausible, not independently verified)"
+    "raw_timestamps": true,
+    "notes": [
+      "Opcode 50 on the PerfInfo provider is ISR-MSI (message-signalled interrupts: GPU, NIC, NVMe) and carries most of the interrupt time; 67 is the legacy ISR. 66 is a threaded DPC, 68 a DPC, 69 a timer DPC.",
+      "Thread opcode 1 is Start and 3 is DCStart (the rundown of threads that already existed); both give tid -> pid.",
+      "File opcodes: 64 Create, 66 Close, 67 Read, 68 Write, 76 OperationEnd. Read/Write carry IrpPtr, FileObject, IoSize, IoFlags; OperationEnd carries IrpPtr, ExtraInfo (bytes transferred), NtStatus.",
+      "Disk opcodes: 10 Read, 11 Write, 14 FlushBuffers (ignored).",
+      "HighResResponseTime is in KeQueryPerformanceCounter tick units (documented by Microsoft on the DiskIo_TypeGroup1 page), so it is converted with the machine's QPC frequency (10 MHz here, i.e. 100 ns). Observed 70-260 us on SATA SSD.",
+      "Event field names (IrpPtr, FileObject, IoSize, IoFlags, ExtraInfo, NtStatus, OpenPath, TransferSize, HighResResponseTime, IssuingThreadId, InitialTime, Routine, ProcessId, TThreadId) are fixed in trace.rs; the startup self-tests report a parse failure if a build names them differently."
+    ],
+    "thread": {
+      "start_opcodes": [1, 3]
+    },
+    "file": {
+      "flags": {
+        "FILE_IO": "0x02000000",
+        "FILE_IO_INIT": "0x04000000",
+        "DISK_FILE_IO": "0x00000200"
+      },
+      "name_opcodes": [0, 32, 35, 36],
+      "create_opcode": 64,
+      "close_opcode": 66,
+      "read_opcode": 67,
+      "write_opcode": 68,
+      "operation_end_opcode": 76,
+      "paging_io_flags": "0x00000042",
+      "end_of_file_ntstatus": "0xC0000011"
+    },
+    "disk": {
+      "read_opcode": 10,
+      "write_opcode": 11
+    },
+    "perf": {
+      "flags": {
+        "DPC": "0x00000020",
+        "INTERRUPT": "0x00000040"
+      },
+      "dpc_opcodes": [66, 68, 69],
+      "isr_opcodes": [50, 67]
+    }
   },
   "quirks": [
-    "FileIo name events (opcodes 0, 36) never arrived in a live session; names come from Create (op64) OpenPath, and from the system handle table for files opened before the trace.",
+    "FileIo Name (0) and FileRundown (36) events were never observed in a live session. FileCreate (32) and FileDelete (35) do arrive with FileObject and FileName, but only for files created or deleted during the trace (found by `collector discover`). Names therefore come mainly from Create (op64) OpenPath, and from the system handle table for files opened before the trace.",
     "FileIo Read/Write IoSize is the REQUESTED size; the transferred size is OperationEnd (op76) ExtraInfo matched by IrpPtr.",
     "FileObject addresses are recycled after Close (op66); resolve names when each event arrives.",
     "A flush (FlushFileBuffers/sync_all) makes the cache manager write the pages as paging I/O credited to the CALLING process; counted as application writes it doubled a 64 MiB write to 128 MiB. Paging requests (IoFlags & 0x42) are excluded from per-process and per-file figures.",
@@ -43,6 +67,7 @@
     "Some disk requests cannot be tied to a thread/process; they carry pid 0xFFFFFFFF, shown as '(unknown process)'.",
     "Live ETW self-tests (collector startup, ~2.5 s) write and read back an 8 MiB file and require it to be measured within bounds; all four passed on this build.",
     "DPC/ISR InitialTime is a raw QPC tick count; header timestamps are only comparable when the trace requests raw timestamps (vendored ferrisetw patch).",
+    "ThreadDPC (66) is documented by Microsoft but did not fire in any discovery or self-test window on this machine; it stays in the profile on the documentation's word.",
     "Some DPC events have InitialTime = 0, giving a duration equal to time since boot; durations over 1 s are dropped.",
     "SystemMemoryListInformation (class 80) needs SeProfileSingleProcessPrivilege; free+zero+standby matched PhysicalAvailable to within 1 MB.",
     "Unelevated process lists under-report working sets of protected processes by roughly 2.4 GB on this machine.",

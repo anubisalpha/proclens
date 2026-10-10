@@ -65,10 +65,34 @@ not "works on every Windows box". That is why per-build profiles exist (see READ
 - `collector/profiles/windows-10-19045.json`: what was verified, at which UBR, on what hardware, plus quirks and ETW opcode tables (as data; the ETW code still uses constants and should move to the profile when ETW is streamed).
 - Match levels: **exact** (same build + UBR), **same build, other patch** (self-tests decide), **untested**.
 - Runtime self-tests today: process list; memory counters; memory page lists (invariant `available == free + zero + standby`, also enforced on every sample, so a changed structure layout yields "no breakdown" rather than nonsense); handle-table layout (opens its own exe, finds that handle in the system table, checks the resolved path).
-- ETW capabilities are now live-tested at startup too (see above). The ETW opcode tables sit in the profile JSON as data but the code still uses constants; moving to the profile is the step that makes a second build truly data-driven.
+- ETW capabilities are now live-tested at startup too (see above). **The ETW opcodes, provider flags, paging-I/O mask, end-of-file status and disk-latency tick length are read from the profile JSON** (`etw` section, typed and validated in `collector/src/params.rs`; unknown keys and contradictory tables are rejected). A build with no profile uses the first built-in profile as a labelled best guess ("event tables from ... (best guess: no profile for build N)"), and the self-tests then decide whether it works. Only the event *field names* (IrpPtr, FileObject, ...) are still fixed in `trace.rs`.
+
+## What Microsoft documents
+The full list of pages, what each is used for, how far each was checked, and where documentation and testing disagree is in [docs/REFERENCES.md](docs/REFERENCES.md). In short: Microsoft publishes per-event reference pages for the kernel events used here (old, simplified, no per-build changelog), a runtime decoding API (TDH), build and revision listings, and a warning that NtQuerySystemInformation structures can change between releases. It does not document the memory-list or handle-table classes, or ETW opcode 50 (ISR-MSI).
+
+## Discovery on this PC vs the profile (2026-10-10)
+`collector discover` (elevated) surveys a live trace, binds event roles **by opcode name** using the field names Windows reports (TDH, via the vendored `Schema::property_names` patch), runs a known workload (cached write, flush, unbuffered control write, two reads to end of file) and compares the result with the profile. Provider flags are *inputs* (copied from the profile), not discovered. Best run, build 19045.7725: **14 match, 2 subset, 0 mismatch.**
+
+| Item | Profile | Discovered | Verdict |
+|---|---|---|---|
+| thread start, file create/close/read/write/operation-end, disk read/write, ISR opcodes | 1,3 / 64,66,67,68,76 / 10,11 / 50,67 | identical | MATCH |
+| `file.name_opcodes` | 0, 32, 35, 36 | 32, 35 | SUBSET (0, 36 never fired) |
+| `perf.dpc_opcodes` | 66, 68, 69 | 68, 69 | SUBSET (66 never fired; Microsoft documents it) |
+| `file.paging_io_flags` | 0x42 | 0x42 | MATCH, derived from behaviour |
+| `file.end_of_file_ntstatus` | 0xC0000011 | 0xC0000011 (x2, once per read-to-end) | MATCH |
+| raw QPC timestamps | true | true (17,463 DPC/ISR events, 0 negative durations) | MATCH |
+| required field names for every bound role | fixed in `trace.rs` | all present | MATCH |
+
+What discovery taught us beyond "it matches":
+- **Name events:** FileCreate (32) and FileDelete (35) *do* arrive with parsable names; only Name (0) and FileRundown (36) were never seen. The earlier statement that name events never arrive was too broad (profile and `docs/REFERENCES.md` corrected).
+- **A subset is not an error but is not confirmation either:** opcodes 0, 36 and 66 stay in the profile on documentation or earlier observation; discovery can only vouch for what fired in its window.
+- **Paging mask:** flush writes carry `0x60043`, ordinary data writes `0x0` or `0x60a00`, the unbuffered control `0x60a01`. Subtracting ordinary and control bits leaves `0x42`. `0x1` (`IRP_NOCACHE`) is on both the flush and control writes, so it is not a paging marker.
+- **Four discovery attempts failed before the fifth matched, each for a method flaw rather than a profile flaw:** (1) phases were stamped by when the callback ran, but ETW delivers in batches about a second late, so phases must come from each event's own QPC timestamp; (2) without an unbuffered control, `IRP_NOCACHE` looked like a paging bit; (3) "every flush write" was vetoed by a stray tiny write from the process's own output, so calibration is now weighted by bytes; (4) the control window also contains small metadata paging writes, which must not define what an unbuffered write looks like (bits need a 10% byte share to count).
+- **Unexplained:** four 1 MiB writes flagged `0x60a00` are attributed to the cached-write step. They don't affect the result but I don't know what they are.
+- **Limits:** the calibration thresholds (90% of flushed bytes, 10% share, 4 KiB minimum) are heuristics chosen to fit what was seen on this one machine, so they need re-checking on another build. The draft `etw` section it can emit (`--emit`) is for human review, not automatic adoption.
 
 ## Not yet verified / not built
-- Disk latency: `HighResResponseTime` is assumed to be in 100 ns units. Values of 70-260 us on SATA SSDs look plausible; not independently checked, and QPC = 10 MHz here hides any unit confusion.
+- Disk latency: Microsoft documents `HighResResponseTime` as `KeQueryPerformanceCounter` ticks, and the collector now converts it with the machine's QPC frequency (an earlier version wrongly hard-coded 100 ns per tick, which only happens to equal a QPC tick on this 10 MHz machine). The measured values (70-260 us on SATA SSD) look plausible but were not checked against an independent timer.
 - Longer runs: memory growth/CPU cost of the trace over hours has not been measured. The `pending_io`, name and handle maps are bounded or cleaned on Close, but this is untested at length.
 - Sort/windowing UI is checked with real data on one machine only; no automated UI test beyond the window-merge unit tests. The "This PC" tab's live capability list was not re-screenshotted after the self-tests went live (the data it shows was verified through `activity_demo`).
 - The close-window path that shuts down a collector the UI launched (idle-exit 30 s is the backstop). Not exercised because the collector in the final test may not have been launched by the app.

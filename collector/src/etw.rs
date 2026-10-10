@@ -15,7 +15,9 @@ fn mb(b: u64) -> f64 {
 
 pub fn run(secs: u64) {
     println!("Starting kernel trace for {secs}s (needs admin)...");
-    let session = match TraceSession::start("ProcLensSpike") {
+    let selection = crate::profile::etw_selection();
+    println!("Event tables: {}", selection.source);
+    let session = match TraceSession::start("ProcLensSpike", selection.params.clone()) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("{e}");
@@ -32,7 +34,14 @@ pub fn run(secs: u64) {
     let drivers = driver_table();
     let names: HashMap<u32, String> =
         Sampler::new().processes().processes.into_iter().map(|p| (p.pid, p.name)).collect();
-    let snap = activity::build(&iv, &names, health.as_ref(), freq, &drivers, &volume_map());
+    let snap = activity::build(
+        &iv,
+        &names,
+        health.as_ref(),
+        freq,
+        &drivers,
+        &volume_map(),
+    );
 
     println!("\n== Session health (ControlTrace QUERY) ==");
     match &health {
