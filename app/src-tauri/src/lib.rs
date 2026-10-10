@@ -192,7 +192,25 @@ fn stop_collector(link: State<Link>) {
     }
 }
 
+/// Name of the mutex that tells the installer the app is open. Must match `AppMutex` in
+/// `installer/proclens.iss`.
+#[cfg(windows)]
+const RUNNING_MUTEX: &str = "ProcLens-App-Running";
+
+/// Holds a named mutex for as long as the process lives, so setup and the uninstaller can refuse to
+/// replace or delete `proclens-app.exe` while it is open. Failure is not fatal: the app still runs,
+/// the installer just can't detect it.
+#[cfg(windows)]
+fn mark_running() {
+    use windows::core::HSTRING;
+    use windows::Win32::System::Threading::CreateMutexW;
+    // The handle is deliberately never closed: Windows releases it when the process exits.
+    let _ = unsafe { CreateMutexW(None, false, &HSTRING::from(RUNNING_MUTEX)) };
+}
+
 pub fn run() {
+    #[cfg(windows)]
+    mark_running();
     tauri::Builder::default()
         .manage(Link {
             status: Mutex::new(Status::Disconnected { reason: None }),

@@ -36,6 +36,9 @@ OutputBaseFilename=proclens-{#AppVersion}-windows-x64-setup
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
+; proclens-app.exe holds this mutex while it runs (RUNNING_MUTEX in app/src-tauri/src/lib.rs).
+; Setup and the uninstaller then ask the user to close the app instead of leaving it behind.
+AppMutex=ProcLens-App-Running
 CloseApplications=yes
 RestartApplications=no
 
