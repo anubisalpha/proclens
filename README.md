@@ -59,11 +59,14 @@ checks (`tools/run-elevated.ps1`, comparing against Windows' own counters as in
 
 ## Beta releases
 
-Pre-built Windows x64 zips are on the [Releases page](https://github.com/anubisalpha/proclens/releases)
-(read the release notes first: the beta is verified on one PC only). To build one yourself from a
-clean checkout: `.\tools\package-release.ps1`, which runs every test, builds (into `target-release\`), adds the third-party
-notices and writes `dist\proclens-<version>-windows-x64.zip` with a SHA-256 file. Release notes
-live in [`docs/releases/`](docs/releases/).
+Pre-built Windows x64 releases are on the [Releases page](https://github.com/anubisalpha/proclens/releases)
+(read the release notes first: the beta is verified on one PC only), as a `...-setup.exe` installer
+and a portable `.zip`. To build both yourself from a clean checkout: `.\tools\package-release.ps1`,
+which runs every test, builds (into `target-release\`), adds the third-party notices (with full
+licence texts), and writes `dist\proclens-<version>-windows-x64.zip` and
+`dist\proclens-<version>-windows-x64-setup.exe`, each with a SHA-256 file. The installer needs
+[Inno Setup 6](https://jrsoftware.org/isinfo.php) (`iscc`) on the build machine; its script is
+[`installer/proclens.iss`](installer/proclens.iss). Release notes live in [`docs/releases/`](docs/releases/).
 
 ## References
 

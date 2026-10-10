@@ -62,7 +62,8 @@ because several of the ETW pages date from 2018-2021.
 | [ferrisetw](https://github.com/n4r1b/ferrisetw) 1.2.0 | Read (source vendored and patched) | Rust ETW consumer | MIT OR Apache-2.0. One patch, in [`vendor/PATCHES.md`](../vendor/PATCHES.md): raw QPC timestamps. |
 | [windows-rs](https://github.com/microsoft/windows-rs) (`windows` crate 0.62) | Unchecked | Win32 bindings | MIT OR Apache-2.0 (licence metadata of the crate; not re-read). |
 | [sysinfo](https://crates.io/crates/sysinfo) 0.39 | Unchecked | Process list | Crate metadata only. |
-| [Tauri 2](https://tauri.app), React 19, Vite 7, Vitest 3 | Unchecked | Desktop shell and UI | Versions in `Cargo.lock` / `app/package-lock.json`. Licences not re-read. |
+| [Tauri 2](https://tauri.app), React 19, Vite 7, Vitest 3 | Unchecked | Desktop shell and UI | Versions in `Cargo.lock` / `app/package-lock.json`. Their licence texts are embedded in `THIRD-PARTY-NOTICES.txt` by `tools/third-party-notices.mjs`. |
+| Licence texts for six crates whose archives ship none (webview2-com, defmt-parser, alloc-stdlib, selectors) | Read (copied byte-for-byte) | Completing `THIRD-PARTY-NOTICES.txt` | Upstream repositories and commits are listed in [`docs/licenses/README.md`](licenses/README.md); the `selectors` repository has no licence file, so it uses the standard MPL-2.0 text from a sibling Servo crate. |
 
 ---
 

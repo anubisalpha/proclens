@@ -1,5 +1,6 @@
-# Builds ProcLens from the current checkout and packages a release zip.
-#   .\tools\package-release.ps1                 # writes dist\proclens-<version>-windows-x64.zip (+ .sha256)
+# Builds ProcLens from the current checkout and packages a release zip and a setup installer.
+#   .\tools\package-release.ps1                 # writes dist\proclens-<version>-windows-x64.zip and
+#                                               # ...-windows-x64-setup.exe, each with a .sha256
 #   .\tools\package-release.ps1 -AllowDirty     # package an uncommitted tree (never for a published release)
 #
 # Builds go to .\target-release (not .\target), so a running dev copy can't block them.
@@ -34,6 +35,13 @@ foreach ($k in $others.Keys) {
     if ($others[$k] -ne $version) { throw "version mismatch: tauri.conf.json says $version but $k says $($others[$k])" }
 }
 Write-Host "version $version"
+# Inno Setup needs a numeric x.y.z.w for the file's version resource.
+$numericVersion = ($version -replace '-.*$', '') + '.0'
+
+# The installer compiler must exist before the (long) builds start.
+$iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+if (-not $iscc) { $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe' }
+if (-not (Test-Path $iscc)) { throw 'Inno Setup 6 (ISCC.exe) not found: install it (e.g. choco install innosetup)' }
 
 # 2. Release builds come from committed code.
 $dirty = git status --porcelain
@@ -93,7 +101,20 @@ Write-Host "zip entries: $count, all with forward slashes"
 $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
 [IO.File]::WriteAllText((Join-Path (Resolve-Path $OutDir).Path "$name.zip.sha256"), "$hash  $name.zip`n", (New-Object Text.UTF8Encoding($false)))
 
+# 6. Installer: the same staged files, wrapped by Inno Setup into one self-extracting setup .exe.
+Step 'Building the installer'
+$setupName = "proclens-$version-windows-x64-setup"
+$outAbs = (Resolve-Path $OutDir).Path
+$setup = Join-Path $outAbs "$setupName.exe"
+if (Test-Path $setup) { [IO.File]::Delete($setup) }
+Run $iscc @('/Qp', "/DAppVersion=$version", "/DNumericVersion=$numericVersion", "/DStageDir=$base", "/DOutDir=$outAbs", "/DRepoRoot=$root", 'installer\proclens.iss')
+if (-not (Test-Path $setup)) { throw "Inno Setup finished but $setup does not exist" }
+$setupHash = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLower()
+[IO.File]::WriteAllText("$setup.sha256", "$setupHash  $setupName.exe`n", (New-Object Text.UTF8Encoding($false)))
+
 Write-Host ''
 Write-Host "Built $zip" -ForegroundColor Green
 Write-Host "SHA-256 $hash"
+Write-Host "Built $setup" -ForegroundColor Green
+Write-Host "SHA-256 $setupHash"
 Get-ChildItem $stage | ForEach-Object { '{0,10:N0} bytes  {1}' -f $_.Length, $_.Name }
