@@ -330,7 +330,7 @@ dependencies = [
 
 [[package]]
 name = "collector"
-version = "0.0.1"
+version = "0.1.0-beta.1"
 dependencies = [
  "ferrisetw",
  "proclens-proto",
@@ -2501,7 +2501,7 @@ dependencies = [
 
 [[package]]
 name = "proclens-app"
-version = "0.0.1"
+version = "0.1.0-beta.1"
 dependencies = [
  "proclens-proto",
  "serde",
@@ -2512,7 +2512,7 @@ dependencies = [
 
 [[package]]
 name = "proclens-proto"
-version = "0.0.1"
+version = "0.1.0-beta.1"
 dependencies = [
  "serde",
  "serde_json",

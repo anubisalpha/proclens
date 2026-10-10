@@ -1,6 +1,9 @@
 # Rust build output
 target/
 
+# Release packaging output (tools/package-release.ps1)
+/dist/
+
 # Front end
 app/node_modules/
 app/dist/

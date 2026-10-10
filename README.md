@@ -57,6 +57,14 @@ To support another PC: run `collector profile` there, check the self-tests, repe
 checks (`tools/run-elevated.ps1`, comparing against Windows' own counters as in
 `SPIKE_FINDINGS.md`), then add a profile JSON and register it in `collector/src/profile.rs`.
 
+## Beta releases
+
+Pre-built Windows x64 zips are on the [Releases page](https://github.com/anubisalpha/proclens/releases)
+(read the release notes first: the beta is verified on one PC only). To build one yourself from a
+clean checkout: `.\tools\package-release.ps1`, which runs every test, builds, adds the third-party
+notices and writes `dist\proclens-<version>-windows-x64.zip` with a SHA-256 file. Release notes
+live in [`docs/releases/`](docs/releases/).
+
 ## References
 
 [`docs/REFERENCES.md`](docs/REFERENCES.md) records every Microsoft page and other source the
