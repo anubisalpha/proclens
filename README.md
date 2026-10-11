@@ -178,7 +178,33 @@ administrator approval. The counters were checked against Windows' own `Get-NetA
 verified PC, which has Ethernet and Bluetooth PAN adapters only. Per-program traffic, Wi-Fi and
 Bluetooth devices are not built; see `docs/NETWORK_SCOPE.md`.
 
+**Ports** and **Connections** (new): which TCP and UDP ports are open and which program holds each
+one, and the live TCP connections grouped by program. Both read Windows' owner-PID tables
+(`GetExtendedTcpTable` / `GetExtendedUdpTable`) in the app itself, so they work before the collector
+is started and need no administrator approval. Ports shows who can reach a listener ("any address"
+or "this PC only"), the ranges Windows keeps back (read from `netsh interface ipv4 show
+excludedportrange`; only English output was checked), and a search box that says whether a port is
+free, in use, or reserved. Connections has Open / Closing / All, an "only outside this PC" toggle and
+a search box. A program Windows protects shows its name but no path. Inside a shared process such as
+`svchost.exe` the view names the Windows services running in it (from the Service Control Manager,
+unelevated): on the verified PC, nine `svchost.exe` processes owning ports showed exactly the
+services PowerShell's `Win32_Service` lists. Where one process hosts several services the view says
+"one of" them, because Windows does not say which one owns a given socket without administrator
+rights. Remote addresses appear on screen and are never looked up.
+
+**Connection log** (new, off until you switch it on, and off again at every start): a separate
+JSON-lines record, apart from the activity log because it holds **real remote addresses**. One line is
+written when a connection or listener ends: program, path, services, remote address and port, first
+and last seen, duration, whether this program had talked to that address before, plus a `traffic`
+line at every check with the whole PC's bytes in and out per adapter (the Network tab's counters; it
+shows how busy the network was, not which program used it). Loopback traffic and connections that are
+already closing are left out. It checks every 5 to 60 seconds, so a connection shorter than that can
+be missed and times are only as exact as the interval (a connection held for 21 seconds was logged as
+15.1 s at a 5 s interval). Files are `proclens-connections-YYYY-MM-DD.jsonl` in the same folder as the
+activity log, kept 28 days and at most 256 MB. How many lines a day this makes has not been
+measured. Format and limits: `docs/CONNECTION_LOG.md`.
+
 Tests: `cargo test --workspace` (protocol, profile matching, activity conversion) and
-`cd app; npm test` (rolling-window merge logic, network rate and adapter logic). `proto/examples/activity_demo.rs` checks the whole
+`cd app; npm test` (rolling-window merge logic, network rate and adapter logic, port and connection filtering). `proto/examples/activity_demo.rs` checks the whole
 streaming path against a known 64 MiB workload; `tools/watch-sessions.ps1` (elevated) logs whether
 the kernel trace session exists, which is how start/stop on tab changes was verified.
