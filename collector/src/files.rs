@@ -3,11 +3,14 @@
 //! Windows for that handle's final path.
 //!
 //! Risks handled: querying some handles (e.g. synchronous pipes) is widely reported to block
-//! forever (Microsoft's GetFileType/GetFinalPathNameByHandle pages don't warn about it), so every query
-//! runs on a throwaway thread with a timeout; only disk-type handles are queried. A query that
-//! times out is abandoned by terminating its thread and closing the duplicated handle from here, so
-//! a hang costs neither a thread nor an open handle (a leaked duplicate of a disk file would keep
-//! that file open and block deleting it or dismounting its volume).
+//! forever (Microsoft's GetFileType/GetFinalPathNameByHandle pages don't warn about it; it did not
+//! reproduce on the tested Windows 10 build), so every query runs on a throwaway thread with a
+//! timeout; only disk-type handles are queried. A query that times out is first cancelled
+//! (`CancelSynchronousIo`); if it still does not return, the worker is *abandoned*: it keeps its
+//! duplicated handle and closes it itself if the call ever returns. Threads are never terminated
+//! (`TerminateThread` crashed a test process about 1 run in 30). To bound what a hang can cost, at
+//! most `MAX_STUCK` workers are abandoned at once; while that many are stuck, lookups are skipped
+//! and the affected files stay "not identified".
 //!
 //! Known limit: the (process, handle) pair comes from a snapshot of the handle table, so a handle
 //! that was closed and reused before the lookup can name a different file. The result is a wrong
@@ -23,7 +26,8 @@ use windows::Win32::Foundation::{CloseHandle, DuplicateHandle, DUPLICATE_SAME_AC
 use windows::Win32::Storage::FileSystem::{
     GetFileType, GetFinalPathNameByHandleW, FILE_TYPE_DISK, GETFINALPATHNAMEBYHANDLE_FLAGS,
 };
-use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcess, TerminateThread, PROCESS_DUP_HANDLE};
+use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcess, PROCESS_DUP_HANDLE};
+use windows::Win32::System::IO::CancelSynchronousIo;
 
 #[link(name = "ntdll", kind = "raw-dylib")]
 extern "system" {
@@ -39,6 +43,10 @@ const SYSTEM_EXTENDED_HANDLE_INFORMATION: u32 = 64;
 const STATUS_INFO_LENGTH_MISMATCH: i32 = 0xC000_0004u32 as i32;
 const VOLUME_NAME_NT: GETFINALPATHNAMEBYHANDLE_FLAGS = GETFINALPATHNAMEBYHANDLE_FLAGS(2);
 const QUERY_TIMEOUT: Duration = Duration::from_millis(500);
+/// How long a cancelled query gets to return before its worker is abandoned.
+const CANCEL_GRACE: Duration = Duration::from_millis(200);
+/// Workers that may be abandoned at once (each holds a thread and a duplicated handle).
+const MAX_STUCK: usize = 8;
 
 /// SYSTEM_HANDLE_TABLE_ENTRY_INFO_EX (undocumented layout, x64).
 #[repr(C)]
@@ -141,11 +149,11 @@ pub fn selftest() -> Result<String, String> {
     }
 }
 
-/// The worker is inside a call that may never return.
-const IN_CALL: u8 = 0;
-/// The worker's calls returned; it is only building the result now and must not be killed.
-const DONE: u8 = 1;
-/// The caller gave up and is terminating the worker.
+/// Workers abandoned because their query would not return.
+static STUCK: AtomicUsize = AtomicUsize::new(0);
+
+const RUNNING: u8 = 0;
+const FINISHED: u8 = 1;
 const ABANDONED: u8 = 2;
 
 /// Duplicates the handle into this process and returns its NT path, or None.
@@ -154,8 +162,8 @@ fn name_of(c: &Candidate) -> Option<String> {
     name_of_with(c, query_path)
 }
 
-/// The calls on the duplicated handle that can hang. Returns raw UTF-16 so nothing is allocated
-/// before the caller has been told the calls are over (see `name_blocking`).
+/// The calls on the duplicated handle that can hang. Returns raw UTF-16 so the worker allocates
+/// nothing while it may be abandoned.
 type PathQuery = fn(HANDLE) -> ([u16; 1024], usize);
 
 fn query_path(h: HANDLE) -> ([u16; 1024], usize) {
@@ -171,39 +179,51 @@ fn query_path(h: HANDLE) -> ([u16; 1024], usize) {
 }
 
 fn name_of_with(c: &Candidate, query: PathQuery) -> Option<String> {
+    if STUCK.load(Ordering::SeqCst) >= MAX_STUCK {
+        return None; // too many hung lookups already; try again once some return
+    }
     let (pid, handle) = (c.pid, c.handle);
     let (tx, rx) = mpsc::channel();
-    let dup = Arc::new(AtomicUsize::new(0));
-    let phase = Arc::new(AtomicU8::new(IN_CALL));
+    let state = Arc::new(AtomicU8::new(RUNNING));
     let worker = {
-        let (dup, phase) = (dup.clone(), phase.clone());
+        let state = state.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(name_blocking(pid, handle, query, &dup, &phase));
+            let name = name_blocking(pid, handle, query);
+            let _ = tx.send(name);
+            // If the caller gave up on us it counted us as stuck; we are not any more.
+            if state.swap(FINISHED, Ordering::SeqCst) == ABANDONED {
+                STUCK.fetch_sub(1, Ordering::SeqCst);
+            }
         })
     };
     match rx.recv_timeout(QUERY_TIMEOUT) {
         Ok(name) => name,
         Err(_) => {
-            if phase.compare_exchange(IN_CALL, ABANDONED, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-                // Stuck in a system call: stop it, then close what it was holding. Termination is
-                // only used in this state, where the thread holds none of our locks.
-                unsafe {
-                    let _ = TerminateThread(HANDLE(worker.as_raw_handle()), 1);
-                    let held = dup.swap(0, Ordering::SeqCst);
-                    if held != 0 {
-                        let _ = CloseHandle(HANDLE(held as *mut _));
-                    }
-                }
+            // Cancels a synchronous call the worker is blocked in, if it is a cancellable one.
+            unsafe {
+                let _ = CancelSynchronousIo(HANDLE(worker.as_raw_handle()));
+            }
+            if let Ok(name) = rx.recv_timeout(CANCEL_GRACE) {
+                return name;
+            }
+            // Count first, then claim: the worker only subtracts after it sees ABANDONED.
+            STUCK.fetch_add(1, Ordering::SeqCst);
+            if state.compare_exchange(RUNNING, ABANDONED, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
+                eprintln!(
+                    "files: a handle lookup is stuck; abandoned it ({} of at most {MAX_STUCK} at once)",
+                    STUCK.load(Ordering::SeqCst)
+                );
                 None
             } else {
-                // The calls returned just as we timed out; the worker is finishing normally.
+                // It finished while we decided: take its answer.
+                STUCK.fetch_sub(1, Ordering::SeqCst);
                 rx.recv().ok().flatten()
             }
         }
     }
 }
 
-fn name_blocking(pid: u32, handle: usize, query: PathQuery, dup: &AtomicUsize, phase: &AtomicU8) -> Option<String> {
+fn name_blocking(pid: u32, handle: usize, query: PathQuery) -> Option<String> {
     unsafe {
         let proc = OpenProcess(PROCESS_DUP_HANDLE, false, pid).ok()?;
         let mut copy = HANDLE::default();
@@ -218,20 +238,8 @@ fn name_blocking(pid: u32, handle: usize, query: PathQuery, dup: &AtomicUsize, p
         );
         let _ = CloseHandle(proc);
         ok.ok()?;
-        // Published so the caller can close it if this thread gets stuck below.
-        dup.store(copy.0 as usize, Ordering::SeqCst);
         let (buf, n) = query(copy);
-        // Past the calls that can hang. If the caller already gave up it is about to terminate
-        // this thread: wait for that (parked, holding nothing) instead of racing it.
-        if phase.compare_exchange(IN_CALL, DONE, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-            loop {
-                std::thread::park();
-            }
-        }
-        let held = dup.swap(0, Ordering::SeqCst);
-        if held != 0 {
-            let _ = CloseHandle(HANDLE(held as *mut _));
-        }
+        let _ = CloseHandle(copy);
         (n > 0 && n < buf.len()).then(|| String::from_utf16_lossy(&buf[..n]))
     }
 }
@@ -267,12 +275,14 @@ mod tests {
         n
     }
 
+    /// Lets the stand-in "hung" query return, like a real hang that eventually clears.
+    static RELEASE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
     fn hang(_: HANDLE) -> ([u16; 1024], usize) {
-        // park, not sleep: std's sleep creates a waitable-timer handle per call, which terminating
-        // the thread would leak and make this test blame the code under test.
-        loop {
-            std::thread::park();
+        while !RELEASE.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(20));
         }
+        ([0u16; 1024], 0)
     }
 
     fn own_exe_handle() -> (std::fs::File, Candidate) {
@@ -281,39 +291,59 @@ mod tests {
         (file, c)
     }
 
-    /// Stands in for the hang the module warns about (a query on a handle another thread is
-    /// blocked on). The lookup must give up, stop the worker and close the handle it duplicated.
+    fn wait_until(what: &str, mut ok: impl FnMut() -> bool) {
+        let t = Instant::now();
+        while !ok() {
+            assert!(t.elapsed() < Duration::from_secs(5), "timed out waiting for: {what}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Stands in for the hang the module warns about (a query that does not return). The lookup
+    /// must give up and say so; the stuck worker holds its handle until it returns, then closes it.
     #[test]
-    fn a_query_that_hangs_is_abandoned_and_its_handle_closed() {
+    fn a_query_that_hangs_is_abandoned_and_cleans_up_when_it_returns() {
         let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        RELEASE.store(false, Ordering::SeqCst);
+        STUCK.store(0, Ordering::SeqCst);
         let (_file, c) = own_exe_handle();
         let before = handle_count();
         let started = Instant::now();
         let name = name_of_with(&c, hang);
         let took = started.elapsed();
         assert!(name.is_none());
-        assert!(took >= QUERY_TIMEOUT - Duration::from_millis(50), "returned before the timeout: {took:?}");
+        assert!(took >= QUERY_TIMEOUT, "returned before the timeout: {took:?}");
         assert!(took < Duration::from_secs(3), "the lookup must give up, took {took:?}");
-        std::thread::sleep(Duration::from_millis(300));
-        let after = handle_count();
-        // The worker thread's own handle is released once it is terminated; nothing may remain.
-        assert!(after <= before, "leaked handles: {before} before, {after} after");
+        assert_eq!(STUCK.load(Ordering::SeqCst), 1, "the stuck worker is counted");
+
+        RELEASE.store(true, Ordering::SeqCst); // the hang clears
+        wait_until("the stuck worker to finish", || STUCK.load(Ordering::SeqCst) == 0);
+        wait_until("the duplicated handle to be closed", || handle_count() <= before);
     }
 
+    /// A machine where every lookup hangs must not pile up threads and handles without limit.
     #[test]
-    fn many_hangs_in_a_row_do_not_accumulate_handles_or_threads() {
+    fn at_most_max_stuck_workers_are_abandoned_then_lookups_are_skipped() {
         let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        RELEASE.store(false, Ordering::SeqCst);
+        STUCK.store(0, Ordering::SeqCst);
         let (_file, c) = own_exe_handle();
-        let before = handle_count();
-        for _ in 0..6 {
+        for _ in 0..MAX_STUCK {
             assert!(name_of_with(&c, hang).is_none());
         }
-        std::thread::sleep(Duration::from_millis(300));
-        let after = handle_count();
-        assert!(after <= before + 1, "leaked handles: {before} before, {after} after six hangs");
+        assert_eq!(STUCK.load(Ordering::SeqCst), MAX_STUCK);
+
+        let started = Instant::now();
+        assert!(name_of_with(&c, hang).is_none());
+        assert!(started.elapsed() < Duration::from_millis(100), "must skip without spawning or waiting");
+        assert_eq!(STUCK.load(Ordering::SeqCst), MAX_STUCK, "a skipped lookup is not another stuck worker");
+
+        // Once the hangs clear, lookups work again.
+        RELEASE.store(true, Ordering::SeqCst);
+        wait_until("the stuck workers to finish", || STUCK.load(Ordering::SeqCst) == 0);
+        assert!(name_of(&c).is_some_and(|n| n.starts_with(r"\Device\")));
     }
 
-    /// Pipes are not disk files: no path, and (on this Windows build at least) no hang either.
     #[test]
     fn a_pipe_handle_has_no_path() {
         let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
