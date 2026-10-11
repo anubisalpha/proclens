@@ -154,9 +154,74 @@ export interface LogStatus {
   cap_mb: number;
 }
 
+/** State of the optional connection log; mirrors the app's `connlog::ConnLogStatus`. */
+export interface ConnLogStatus {
+  enabled: boolean;
+  interval_s: number;
+  dir: string;
+  file: string | null;
+  /** Lines written since logging was switched on. */
+  lines: number;
+  /** Sessions being watched right now that have not been written yet. */
+  open_sessions: number;
+  /** (program, address) pairs known, behind the "new address" flag. */
+  seen_pairs: number;
+  error: string | null;
+  keep_days: number;
+  cap_mb: number;
+}
+
 export interface NetworkSelfTest {
   ok: boolean;
   detail: string;
+}
+
+/** One TCP listener or connection, or one bound UDP socket; mirrors the app's `ports::Endpoint`. */
+export interface PortEndpoint {
+  proto: "tcp" | "udp";
+  v6: boolean;
+  local_addr: string;
+  local_port: number;
+  remote_addr: string | null;
+  remote_port: number | null;
+  /** TCP state in snake_case ("listen", "established"); null for UDP. */
+  state: string | null;
+  pid: number;
+}
+
+export interface PortService {
+  /** Short name ("Dnscache"). */
+  name: string;
+  /** The name services.msc shows ("DNS Client"). */
+  display: string;
+}
+
+export interface PortOwner {
+  pid: number;
+  name: string | null;
+  path: string | null;
+  /** Windows services running inside this process; empty for an ordinary program. */
+  services: PortService[];
+}
+
+export interface PortsSnapshot {
+  endpoints: PortEndpoint[];
+  owners: PortOwner[];
+  /** Set when the service list could not be read; then no program shows services. */
+  services_error: string | null;
+}
+
+export interface ExcludedRange {
+  proto: "tcp" | "udp";
+  start: number;
+  end: number;
+  /** Set by an administrator (netsh marks these with `*`), rather than reserved by Windows itself. */
+  administered: boolean;
+}
+
+export interface ExcludedRanges {
+  ranges: ExcludedRange[];
+  error: string | null;
 }
 
 export type Status =

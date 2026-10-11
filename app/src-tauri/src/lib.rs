@@ -4,8 +4,10 @@
 //! One thread owns the pipe connection. It forwards collector data to the web UI as events and
 //! carries UI commands (subscribe, shutdown) to the collector.
 
+pub mod connlog;
 pub mod logger;
 pub mod network;
+pub mod ports;
 mod update;
 
 use std::path::PathBuf;
@@ -252,6 +254,10 @@ pub fn run() {
             logger::Logger::default_dir().unwrap_or_else(|| std::env::temp_dir().join("ProcLens-logs")),
             env!("CARGO_PKG_VERSION"),
         ))
+        .manage(connlog::ConnLog::new(
+            logger::Logger::default_dir().unwrap_or_else(|| std::env::temp_dir().join("ProcLens-logs")),
+            env!("CARGO_PKG_VERSION"),
+        ))
         .invoke_handler(tauri::generate_handler![
             get_status,
             start_collector,
@@ -260,8 +266,12 @@ pub fn run() {
             logger::log_status,
             logger::log_set,
             logger::log_open_folder,
+            connlog::connlog_status,
+            connlog::connlog_set,
             network::network_snapshot,
             network::network_selftest,
+            ports::ports_snapshot,
+            ports::ports_excluded,
             update::check_for_update,
             update::open_project_page,
             update::open_release_page
@@ -274,12 +284,15 @@ pub fn run() {
             std::thread::spawn(move || loop {
                 std::thread::sleep(Duration::from_secs(1));
                 logger::tick(&handle, &handle.state::<logger::Logger>());
+                connlog::tick(&handle, &handle.state::<connlog::ConnLog>());
             });
             Ok(())
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { .. } = event {
                 let app = window.app_handle();
+                // Sessions still open are written out now; the log is off at the next start anyway.
+                connlog::shutdown(&app.state::<connlog::ConnLog>());
                 let link = app.state::<Link>();
                 if link.launched_by_us.load(Ordering::SeqCst) {
                     if let Some(tx) = &*link.tx.lock().unwrap() {

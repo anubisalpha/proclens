@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useCollector } from "./api";
 import { windowOf } from "./activityWindow";
+import { ConnectionsView } from "./ConnectionsView";
 import { DiskView } from "./DiskView";
 import { DriversView } from "./DriversView";
 import { Footer } from "./Footer";
@@ -8,12 +9,15 @@ import { LoggingCard } from "./LoggingCard";
 import { MemoryView } from "./MemoryView";
 import { NetworkView } from "./NetworkView";
 import { Overview } from "./Overview";
+import { PortsView } from "./PortsView";
 import { ProcessTable } from "./ProcessTable";
 import { ProfileCard } from "./ProfileCard";
+import { useConnLog } from "./useConnLog";
 import { useLogging } from "./useLogging";
 import { useNetwork } from "./useNetwork";
+import { usePorts } from "./usePorts";
 
-type Tab = "overview" | "memory" | "disk" | "drivers" | "network" | "pc";
+type Tab = "overview" | "memory" | "disk" | "drivers" | "network" | "ports" | "connections" | "pc";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "overview", label: "Overview" },
@@ -21,6 +25,8 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "disk", label: "Disk & files" },
   { id: "drivers", label: "Drivers" },
   { id: "network", label: "Network" },
+  { id: "ports", label: "Ports" },
+  { id: "connections", label: "Connections" },
   { id: "pc", label: "This PC" },
 ];
 
@@ -29,9 +35,12 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("overview");
   const connected = status.state === "connected";
   const logging = useLogging();
+  const connlog = useConnLog();
 
   // Adapter counters are read by the app itself; poll them only while a view shows them.
   const net = useNetwork(!connected || tab === "overview" || tab === "network");
+  // Same for the port tables.
+  const ports = usePorts(!connected || tab === "ports" || tab === "connections", !connected || tab === "ports");
 
   // The kernel trace is costly, so it only runs while a view that needs it is on screen, or while
   // the activity log is on (it records disk and driver activity too).
@@ -66,6 +75,11 @@ export default function App() {
               Collector not running
               <button onClick={start}>Start collector</button>
             </>
+          )}
+          {connlog.status?.enabled && (
+            <span className="rec-badge" title="The connection log is on; see Connections">
+              <span className="dot rec" aria-hidden="true" /> Recording connections
+            </span>
           )}
           {logging.status?.enabled && (
             <span className="rec-badge" title="The activity log is on; see Overview">
@@ -102,6 +116,8 @@ export default function App() {
           <Overview connected={false} memory={null} processes={null} profile={null} net={net} onStart={start} onGoTo={() => {}} />
           <LoggingCard status={logging.status} error={logging.error} connected={false} onSet={logging.set} onOpenFolder={logging.openFolder} />
           <NetworkView net={net} standalone />
+          <PortsView ports={ports} standalone />
+          <ConnectionsView ports={ports} connlog={connlog} standalone />
         </>
       )}
 
@@ -138,6 +154,8 @@ export default function App() {
             {tab === "disk" && <DiskView win={win} profile={profile} />}
             {tab === "drivers" && <DriversView win={win} profile={profile} />}
             {tab === "network" && <NetworkView net={net} />}
+            {tab === "ports" && <PortsView ports={ports} />}
+            {tab === "connections" && <ConnectionsView ports={ports} connlog={connlog} />}
             {tab === "pc" && (profile ? <ProfileCard profile={profile} /> : <p className="dim">Waiting for the first reading…</p>)}
           </div>
         </>

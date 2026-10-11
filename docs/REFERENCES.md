@@ -136,6 +136,20 @@ verification runs described in `SPIKE_FINDINGS.md`, but treat the documentation 
 `RegGetValueW`, `ControlTraceW`, `StartTrace`/`CloseTrace` (via ferrisetw), WebView2's remote
 debugging port (test tooling only).
 
+Ports view (`app/src-tauri/src/ports.rs`, added after beta.3): `GetExtendedTcpTable` /
+`GetExtendedUdpTable` (owner-PID table classes) and the `MIB_TCPROW_OWNER_PID`,
+`MIB_TCP6ROW_OWNER_PID`, `MIB_UDPROW_OWNER_PID`, `MIB_UDP6ROW_OWNER_PID` row layouts, taken from the
+`windows` crate bindings, not from a Microsoft page; `CreateToolhelp32Snapshot` /
+`Process32FirstW` / `Process32NextW` for program names; `OpenSCManagerW` / `EnumServicesStatusExW`
+(`SC_ENUM_PROCESS_INFO`, running Win32 services) for the services inside each process, read unelevated
+on the verified PC (9 `svchost.exe` processes matched the PowerShell `Win32_Service` list exactly); and `netsh interface ipv4 show
+excludedportrange protocol=tcp|udp` (no documented API was found for the reserved ranges, and its
+output was only checked in English: the parser reads numbers and the `*` marker only). On the
+verified PC the unit tests open their own TCP (IPv4, IPv6) and UDP sockets and find them in the
+tables with the right pid and address, which checks the row offsets for those three; the IPv6 UDP
+row layout is only checked against synthetic buffers (the IPv6 TCP check is skipped on a PC where
+binding `[::1]` fails), and the port byte order is checked by that same test.
+
 ## Maintaining this file
 
 - Add a row whenever code starts to depend on a new page, API or structure, with the status

@@ -9,7 +9,7 @@
 //! JSON object with a schema version `v`. Times are UTC (RFC 3339) so a file is unambiguous when
 //! shared. Each sample holds summary numbers plus the top few offenders; it contains process names,
 //! file paths and driver names, which is why the UI says so next to the switch. It never contains
-//! network addresses.
+//! network addresses; the separate, opt-in connection log (`connlog.rs`) is where those go.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -77,18 +77,21 @@ pub fn rfc3339_utc(t: SystemTime) -> String {
 }
 
 /// Whole days since the epoch (the UTC date), used to start a new file at midnight UTC.
-fn day_number(t: SystemTime) -> i64 {
+pub fn day_number(t: SystemTime) -> i64 {
     (unix_secs(t).0 / 86_400) as i64
 }
 
-pub fn file_name_for_day(day: i64) -> String {
+/// `<prefix>YYYY-MM-DD.jsonl`; the activity log uses `proclens-`, the connection log its own prefix.
+pub fn name_for_day(prefix: &str, day: i64) -> String {
     let (y, m, d) = civil_from_days(day);
-    format!("proclens-{y:04}-{m:02}-{d:02}.jsonl")
+    format!("{prefix}{y:04}-{m:02}-{d:02}.jsonl")
 }
 
-/// The day number in a log file name, or None for any file that is not one of ours.
-pub fn day_of_file_name(name: &str) -> Option<i64> {
-    let stem = name.strip_prefix("proclens-")?.strip_suffix(".jsonl")?;
+/// The day number in a file name of the form `<prefix>YYYY-MM-DD.jsonl`, or None for any other file.
+/// A name with extra words before the date (`proclens-connections-2026-10-11.jsonl` against the
+/// prefix `proclens-`) is not a match, so each log only ever sees its own files.
+pub fn day_of_name(prefix: &str, name: &str) -> Option<i64> {
+    let stem = name.strip_prefix(prefix)?.strip_suffix(".jsonl")?;
     let mut parts = stem.split('-');
     let (y, m, d) = (parts.next()?, parts.next()?, parts.next()?);
     if parts.next().is_some() || y.len() != 4 || m.len() != 2 || d.len() != 2 {
@@ -99,7 +102,16 @@ pub fn day_of_file_name(name: &str) -> Option<i64> {
         return None;
     }
     let day = days_from_civil(y, m, d);
-    (file_name_for_day(day) == name).then_some(day) // rejects 2026-02-31 and the like
+    (name_for_day(prefix, day) == name).then_some(day) // rejects 2026-02-31 and the like
+}
+
+pub fn file_name_for_day(day: i64) -> String {
+    name_for_day("proclens-", day)
+}
+
+/// The day number in an activity-log file name, or None for any file that is not one of ours.
+pub fn day_of_file_name(name: &str) -> Option<i64> {
+    day_of_name("proclens-", name)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -109,8 +121,13 @@ pub fn day_of_file_name(name: &str) -> Option<i64> {
 /// Which of our files to delete: anything older than `keep_days` before `today`, then the oldest
 /// remaining until the total is within `cap`. `files` is (name, size); other files are never chosen.
 pub fn plan_prune(files: &[(String, u64)], today: i64, keep_days: i64, cap: u64) -> Vec<String> {
+    plan_prune_for("proclens-", files, today, keep_days, cap)
+}
+
+/// [`plan_prune`] for the files of one log, named by `prefix`.
+pub fn plan_prune_for(prefix: &str, files: &[(String, u64)], today: i64, keep_days: i64, cap: u64) -> Vec<String> {
     let mut ours: Vec<(i64, &str, u64)> =
-        files.iter().filter_map(|(n, s)| day_of_file_name(n).map(|d| (d, n.as_str(), *s))).collect();
+        files.iter().filter_map(|(n, s)| day_of_name(prefix, n).map(|d| (d, n.as_str(), *s))).collect();
     ours.sort();
     let mut doomed: Vec<String> = ours.iter().filter(|(d, _, _)| *d < today - keep_days).map(|(_, n, _)| n.to_string()).collect();
     let mut total: u64 = ours.iter().filter(|(_, n, _)| !doomed.iter().any(|x| x == n)).map(|(_, _, s)| *s).sum();
