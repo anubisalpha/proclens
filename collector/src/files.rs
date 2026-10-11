@@ -151,6 +151,26 @@ const ABANDONED: u8 = 2;
 /// Duplicates the handle into this process and returns its NT path, or None.
 /// Runs the potentially blocking calls on a worker thread with a timeout.
 fn name_of(c: &Candidate) -> Option<String> {
+    name_of_with(c, query_path)
+}
+
+/// The calls on the duplicated handle that can hang. Returns raw UTF-16 so nothing is allocated
+/// before the caller has been told the calls are over (see `name_blocking`).
+type PathQuery = fn(HANDLE) -> ([u16; 1024], usize);
+
+fn query_path(h: HANDLE) -> ([u16; 1024], usize) {
+    let mut buf = [0u16; 1024];
+    let n = unsafe {
+        if GetFileType(h) == FILE_TYPE_DISK {
+            GetFinalPathNameByHandleW(h, &mut buf, VOLUME_NAME_NT) as usize
+        } else {
+            0
+        }
+    };
+    (buf, n)
+}
+
+fn name_of_with(c: &Candidate, query: PathQuery) -> Option<String> {
     let (pid, handle) = (c.pid, c.handle);
     let (tx, rx) = mpsc::channel();
     let dup = Arc::new(AtomicUsize::new(0));
@@ -158,7 +178,7 @@ fn name_of(c: &Candidate) -> Option<String> {
     let worker = {
         let (dup, phase) = (dup.clone(), phase.clone());
         std::thread::spawn(move || {
-            let _ = tx.send(name_blocking(pid, handle, &dup, &phase));
+            let _ = tx.send(name_blocking(pid, handle, query, &dup, &phase));
         })
     };
     match rx.recv_timeout(QUERY_TIMEOUT) {
@@ -183,7 +203,7 @@ fn name_of(c: &Candidate) -> Option<String> {
     }
 }
 
-fn name_blocking(pid: u32, handle: usize, dup: &AtomicUsize, phase: &AtomicU8) -> Option<String> {
+fn name_blocking(pid: u32, handle: usize, query: PathQuery, dup: &AtomicUsize, phase: &AtomicU8) -> Option<String> {
     unsafe {
         let proc = OpenProcess(PROCESS_DUP_HANDLE, false, pid).ok()?;
         let mut copy = HANDLE::default();
@@ -200,12 +220,7 @@ fn name_blocking(pid: u32, handle: usize, dup: &AtomicUsize, phase: &AtomicU8) -
         ok.ok()?;
         // Published so the caller can close it if this thread gets stuck below.
         dup.store(copy.0 as usize, Ordering::SeqCst);
-        let mut buf = [0u16; 1024];
-        let n = if GetFileType(copy) == FILE_TYPE_DISK {
-            GetFinalPathNameByHandleW(copy, &mut buf, VOLUME_NAME_NT) as usize
-        } else {
-            0
-        };
+        let (buf, n) = query(copy);
         // Past the calls that can hang. If the caller already gave up it is about to terminate
         // this thread: wait for that (parked, holding nothing) instead of racing it.
         if phase.compare_exchange(IN_CALL, DONE, Ordering::SeqCst, Ordering::SeqCst).is_err() {
@@ -234,4 +249,96 @@ pub fn resolve(wanted: &HashSet<usize>) -> HashMap<usize, String> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+    use windows::Win32::System::Pipes::CreatePipe;
+    use windows::Win32::System::Threading::GetProcessHandleCount;
+
+    /// Tests that count the process's handles must not overlap with ones that open handles.
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn handle_count() -> u32 {
+        let mut n = 0u32;
+        unsafe { GetProcessHandleCount(GetCurrentProcess(), &mut n) }.unwrap();
+        n
+    }
+
+    fn hang(_: HANDLE) -> ([u16; 1024], usize) {
+        // park, not sleep: std's sleep creates a waitable-timer handle per call, which terminating
+        // the thread would leak and make this test blame the code under test.
+        loop {
+            std::thread::park();
+        }
+    }
+
+    fn own_exe_handle() -> (std::fs::File, Candidate) {
+        let file = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
+        let c = Candidate { object: 0, pid: std::process::id(), handle: file.as_raw_handle() as usize };
+        (file, c)
+    }
+
+    /// Stands in for the hang the module warns about (a query on a handle another thread is
+    /// blocked on). The lookup must give up, stop the worker and close the handle it duplicated.
+    #[test]
+    fn a_query_that_hangs_is_abandoned_and_its_handle_closed() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (_file, c) = own_exe_handle();
+        let before = handle_count();
+        let started = Instant::now();
+        let name = name_of_with(&c, hang);
+        let took = started.elapsed();
+        assert!(name.is_none());
+        assert!(took >= QUERY_TIMEOUT - Duration::from_millis(50), "returned before the timeout: {took:?}");
+        assert!(took < Duration::from_secs(3), "the lookup must give up, took {took:?}");
+        std::thread::sleep(Duration::from_millis(300));
+        let after = handle_count();
+        // The worker thread's own handle is released once it is terminated; nothing may remain.
+        assert!(after <= before, "leaked handles: {before} before, {after} after");
+    }
+
+    #[test]
+    fn many_hangs_in_a_row_do_not_accumulate_handles_or_threads() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (_file, c) = own_exe_handle();
+        let before = handle_count();
+        for _ in 0..6 {
+            assert!(name_of_with(&c, hang).is_none());
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        let after = handle_count();
+        assert!(after <= before + 1, "leaked handles: {before} before, {after} after six hangs");
+    }
+
+    /// Pipes are not disk files: no path, and (on this Windows build at least) no hang either.
+    #[test]
+    fn a_pipe_handle_has_no_path() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut read, mut write) = (HANDLE::default(), HANDLE::default());
+        unsafe { CreatePipe(&mut read, &mut write, None, 0) }.unwrap();
+        let name = name_of(&Candidate { object: 0, pid: std::process::id(), handle: read.0 as usize });
+        unsafe {
+            let _ = CloseHandle(read);
+            let _ = CloseHandle(write);
+        }
+        assert!(name.is_none());
+    }
+
+    #[test]
+    fn a_normal_file_handle_still_resolves() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let exe = std::env::current_exe().unwrap();
+        let file = std::fs::File::open(&exe).unwrap();
+        let name = name_of(&Candidate {
+            object: 0,
+            pid: std::process::id(),
+            handle: file.as_raw_handle() as usize,
+        })
+        .expect("a disk file resolves to an NT path");
+        assert!(name.starts_with(r"\Device\"), "{name}");
+        assert!(name.to_lowercase().ends_with(&exe.file_name().unwrap().to_string_lossy().to_lowercase()));
+    }
 }

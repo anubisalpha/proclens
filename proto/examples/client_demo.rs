@@ -16,7 +16,7 @@ fn main() {
         Ok(c) => c,
         Err(e) if e.raw_os_error() == Some(2) => {
             println!("collector not running; launching it elevated (approve the UAC prompt)...");
-            if let Err(e) = client::launch_elevated(&exe, "serve --idle-exit 20") {
+            if let Err(e) = client::launch_elevated(&exe, &launch_args()) {
                 println!("LAUNCH FAILED: {e}");
                 exit(2);
             }
@@ -101,4 +101,15 @@ fn main() {
         }
     }
     println!("OK");
+}
+
+/// The arguments the UI itself uses to launch the collector (its own SID goes along, so a collector
+/// elevated under another account still lets this process in).
+fn launch_args() -> String {
+    let mut args = String::from("serve --idle-exit 20");
+    if let Ok(sid) = client::current_user_sid() {
+        args.push_str(" --allow-sid ");
+        args.push_str(&sid);
+    }
+    args
 }

@@ -153,6 +153,16 @@ impl State {
         *self.parse_errors.entry(format!("{kind:?}/op{opcode}/{field}")).or_default() += 1;
     }
 
+    /// Objects the resolver already tried and failed on will never get a name: report their bytes
+    /// now (under UNRESOLVED) rather than holding them until the file closes.
+    fn flush_given_up(&mut self) {
+        let tried: Vec<usize> =
+            self.unnamed_bytes.keys().filter(|o| self.resolve_tried.contains(*o)).copied().collect();
+        for o in tried {
+            self.flush_obj(o);
+        }
+    }
+
     /// Moves bytes held for an unnamed FileObject into the by-name table.
     fn flush_obj(&mut self, obj: usize) {
         if let Some(b) = self.unnamed_bytes.remove(&obj) {
@@ -367,6 +377,11 @@ fn handler(
 /// (slow, lock-free) lookup would let an interval tick flush them mid-lookup and throw the name
 /// away when it arrived.
 fn resolve_pass(state: &Mutex<State>) {
+    resolve_pass_with(state, files::resolve);
+}
+
+/// `resolve_pass` with the handle-table lookup passed in, so a test can act during the lookup.
+fn resolve_pass_with(state: &Mutex<State>, resolver: impl FnOnce(&HashSet<usize>) -> HashMap<usize, String>) {
     let wanted: HashSet<usize> = {
         let s = state.lock().unwrap();
         s.unnamed_bytes
@@ -378,7 +393,7 @@ fn resolve_pass(state: &Mutex<State>) {
     if wanted.is_empty() {
         return;
     }
-    let names = files::resolve(&wanted);
+    let names = resolver(&wanted);
     let mut s = state.lock().unwrap();
     for obj in wanted {
         // Only act if the object is still live and unnamed (it may have closed meanwhile).
@@ -549,13 +564,7 @@ impl TraceSession {
     /// Returns what happened since the previous call (or since start) and starts a new interval.
     pub fn take_interval(&self) -> Interval {
         let mut s = self.state.lock().unwrap();
-        // Objects the resolver already tried and failed on will never get a name: report their
-        // bytes now (under UNRESOLVED) rather than holding them until the file closes.
-        let tried: Vec<usize> =
-            s.unnamed_bytes.keys().filter(|o| s.resolve_tried.contains(*o)).copied().collect();
-        for o in tried {
-            s.flush_obj(o);
-        }
+        s.flush_given_up();
         let mut iv = std::mem::take(&mut s.cur);
         let mut last = self.last_take.lock().unwrap();
         iv.elapsed = last.elapsed();
@@ -652,5 +661,58 @@ pub fn owner<'a>(table: &'a [(usize, String)], addr: usize) -> &'a str {
         "?"
     } else {
         name
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state_with_unnamed(obj: usize, bytes: u64) -> Mutex<State> {
+        let mut s = State::default();
+        s.unnamed_bytes.insert(obj, bytes);
+        Mutex::new(s)
+    }
+
+    /// The interval tick runs while a lookup is in flight (it takes seconds on a busy machine).
+    /// The bytes must wait for the lookup and end up under the file's name, not "not identified".
+    #[test]
+    fn an_interval_tick_during_a_lookup_does_not_orphan_the_name() {
+        let state = state_with_unnamed(0x1000, 4096);
+        resolve_pass_with(&state, |wanted| {
+            assert!(wanted.contains(&0x1000));
+            state.lock().unwrap().flush_given_up(); // what take_interval does, mid-lookup
+            HashMap::from([(0x1000, r"\Device\HarddiskVolume3\a.txt".to_string())])
+        });
+        let s = state.lock().unwrap();
+        assert_eq!(s.cur.file_bytes.get(r"\Device\HarddiskVolume3\a.txt"), Some(&4096));
+        assert!(!s.cur.file_bytes.contains_key(UNRESOLVED), "bytes must not be reported as unidentified");
+        assert!(s.unnamed_bytes.is_empty());
+    }
+
+    #[test]
+    fn an_object_that_could_not_be_resolved_is_reported_unidentified_at_the_next_tick() {
+        let state = state_with_unnamed(0x2000, 100);
+        resolve_pass_with(&state, |_| HashMap::new());
+        let mut s = state.lock().unwrap();
+        assert!(s.resolve_tried.contains(&0x2000));
+        s.flush_given_up();
+        assert_eq!(s.cur.file_bytes.get(UNRESOLVED), Some(&100));
+        drop(s);
+        // And it is not looked up again.
+        resolve_pass_with(&state, |wanted| panic!("must not retry {wanted:?}"));
+    }
+
+    #[test]
+    fn an_object_closed_during_the_lookup_is_left_alone() {
+        let state = state_with_unnamed(0x3000, 7);
+        resolve_pass_with(&state, |_| {
+            let mut s = state.lock().unwrap();
+            s.flush_obj(0x3000); // the Close event arrived meanwhile
+            HashMap::from([(0x3000, "late".to_string())])
+        });
+        let s = state.lock().unwrap();
+        assert!(!s.file_names.contains_key(&0x3000), "a closed object's address may be reused: do not name it");
+        assert!(!s.resolve_tried.contains(&0x3000));
     }
 }
