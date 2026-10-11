@@ -23,7 +23,8 @@ AppUpdatesURL=https://github.com/anubisalpha/proclens/releases
 VersionInfoVersion={#NumericVersion}
 VersionInfoDescription=ProcLens setup
 DefaultDirName={autopf}\ProcLens
-DefaultGroupName=ProcLens
+DefaultGroupName=aity\ProcLens
+UsePreviousGroup=no
 DisableProgramGroupPage=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -61,9 +62,11 @@ Source: "{#RepoRoot}\installer\run-discover.ps1"; DestDir: "{app}"; Flags: ignor
 [InstallDelete]
 ; 0.1.0-beta.1 put a single ProcLens shortcut directly in the Start menu; it now lives in a folder.
 Type: files; Name: "{autoprograms}\ProcLens.lnk"
+; Later builds used Start menu\Programs\ProcLens; it now lives under the shared aity folder.
+Type: filesandordirs; Name: "{autoprograms}\ProcLens"
 
 [Icons]
-; {group} is Start menu\Programs\ProcLens (DefaultGroupName; the group page is disabled).
+; {group} is Start menu\Programs\aity\ProcLens (DefaultGroupName; the group page is disabled).
 Name: "{group}\ProcLens"; Filename: "{app}\proclens-app.exe"
 ; Notepad rather than the .md file association, which may not exist.
 Name: "{group}\README"; Filename: "{sys}\notepad.exe"; Parameters: """{app}\README.md"""
