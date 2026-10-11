@@ -1,0 +1,121 @@
+# Manual only: asks each GitHub-hosted Windows image what ProcLens makes of it.
+#
+# For every image it builds the collector, then records the OS facts, `collector profile` (build,
+# profile match and self-tests) and an elevated `collector discover` (the ETW event tables this build
+# really sends, compared with the built-in profile), and uploads them. Nothing is published.
+#
+# What this can and cannot tell us: these are Windows *Server* images (and Windows 11 on arm64) running
+# as virtual machines. A failed trace self-test here may be the VM, not the Windows build, so treat
+# results as evidence about "does it run and what does the build send", not as verification of a
+# profile. Verification is still done by hand on real hardware (see docs/REFERENCES.md).
+name: Survey Windows images
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  survey:
+    name: survey (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    # The arm64 image may not have a Rust toolchain, and the collector has only ever been built for x64:
+    # a failure there is information, not a reason to stop the other images.
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-2022, experimental: false }
+          - { os: windows-2025, experimental: false }
+          - { os: windows-2025-vs2026, experimental: false }
+          - { os: windows-11-arm, experimental: true }
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: survey-${{ matrix.os }}
+
+      - name: Toolchain
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustc --version
+          cargo --version
+          rustc -vV | Select-String '^host'
+
+      - name: Build the collector
+        run: |
+          cargo build --release -p collector --locked
+          if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)" }
+
+      - name: Survey
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $out = Join-Path $env:RUNNER_TEMP 'survey'
+          New-Item -ItemType Directory -Force $out | Out-Null
+          $exe = (Resolve-Path 'target\release\collector.exe').Path
+
+          # --- the machine
+          $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+          $cs = Get-CimInstance Win32_ComputerSystem
+          $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+          @(
+            "image label:      ${{ matrix.os }}"
+            "ProductName:      $($cv.ProductName)"
+            "Edition:          $($cv.EditionID)"
+            "DisplayVersion:   $($cv.DisplayVersion)"
+            "Build.UBR:        $($cv.CurrentBuild).$($cv.UBR)"
+            "OS architecture:  $env:PROCESSOR_ARCHITECTURE (native: $env:PROCESSOR_ARCHITEW6432)"
+            "Manufacturer:     $($cs.Manufacturer)"
+            "Model:            $($cs.Model)"
+            "Hypervisor present: $($cs.HypervisorPresent)  (also true on a physical PC with Hyper-V or VBS on; Manufacturer and Model say if it is a VM)"
+            "Logical CPUs:     $($cs.NumberOfLogicalProcessors)"
+            "RAM (GB):         $([math]::Round($cs.TotalPhysicalMemory / 1GB, 1))"
+            "Runner is admin:  $isAdmin"
+            "Image version:    $env:ImageVersion"
+          ) | Tee-Object (Join-Path $out 'os.txt')
+
+          # --- collector profile (build, profile match, self-tests)
+          "=== collector profile"
+          # cmd does the redirection: PowerShell 5.1's `>` and `*>` write UTF-16 and mangle native stderr.
+          cmd /c "`"$exe`" profile > `"$(Join-Path $out 'profile.txt')`" 2>&1"
+          "profile exit code: $LASTEXITCODE" | Add-Content -Encoding utf8 (Join-Path $out 'profile.txt')
+          Get-Content (Join-Path $out 'profile.txt')
+
+          # --- collector discover (needs an elevated process)
+          "=== collector discover"
+          cmd /c "`"$exe`" discover --emit `"$(Join-Path $out 'discover-profile.json')`" > `"$(Join-Path $out 'discover.txt')`" 2>&1"
+          "discover exit code: $LASTEXITCODE" | Add-Content -Encoding utf8 (Join-Path $out 'discover.txt')
+          Get-Content (Join-Path $out 'discover.txt')
+
+          # --- a readable summary on the run page
+          $md = @()
+          $md += "## Survey: ${{ matrix.os }}"
+          $md += '```'
+          $md += Get-Content (Join-Path $out 'os.txt')
+          $md += '```'
+          $md += '### collector profile'
+          $md += '```'
+          $md += Get-Content (Join-Path $out 'profile.txt') | Select-Object -First 40
+          $md += '```'
+          $md += '### collector discover (first 80 lines; the full output and the draft profile are in the artifact)'
+          $md += '```'
+          $md += Get-Content (Join-Path $out 'discover.txt') | Select-Object -First 80
+          $md += '```'
+          [IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, (($md -join "`n") + "`n"), (New-Object Text.UTF8Encoding $false))
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: survey-${{ matrix.os }}
+          path: ${{ runner.temp }}/survey
+          retention-days: 30
+          if-no-files-found: warn
