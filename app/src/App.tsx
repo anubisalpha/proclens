@@ -4,15 +4,19 @@ import { windowOf } from "./activityWindow";
 import { DiskView } from "./DiskView";
 import { DriversView } from "./DriversView";
 import { Footer } from "./Footer";
+import { LoggingCard } from "./LoggingCard";
 import { MemoryView } from "./MemoryView";
 import { NetworkView } from "./NetworkView";
+import { Overview } from "./Overview";
 import { ProcessTable } from "./ProcessTable";
 import { ProfileCard } from "./ProfileCard";
+import { useLogging } from "./useLogging";
 import { useNetwork } from "./useNetwork";
 
-type Tab = "memory" | "disk" | "drivers" | "network" | "pc";
+type Tab = "overview" | "memory" | "disk" | "drivers" | "network" | "pc";
 
 const TABS: { id: Tab; label: string }[] = [
+  { id: "overview", label: "Overview" },
   { id: "memory", label: "Memory" },
   { id: "disk", label: "Disk & files" },
   { id: "drivers", label: "Drivers" },
@@ -22,14 +26,16 @@ const TABS: { id: Tab; label: string }[] = [
 
 export default function App() {
   const { status, memory, processes, profile, activity, error, start, stop, setActivityEnabled } = useCollector();
-  const [tab, setTab] = useState<Tab>("memory");
+  const [tab, setTab] = useState<Tab>("overview");
   const connected = status.state === "connected";
+  const logging = useLogging();
 
   // Adapter counters are read by the app itself; poll them only while a view shows them.
-  const net = useNetwork(!connected || tab === "network");
+  const net = useNetwork(!connected || tab === "overview" || tab === "network");
 
-  // The kernel trace is costly, so it only runs while a view that needs it is on screen.
-  const wantTrace = connected && (tab === "disk" || tab === "drivers");
+  // The kernel trace is costly, so it only runs while a view that needs it is on screen, or while
+  // the activity log is on (it records disk and driver activity too).
+  const wantTrace = connected && (tab === "disk" || tab === "drivers" || logging.status?.enabled === true);
   useEffect(() => {
     setActivityEnabled(wantTrace);
   }, [wantTrace, setActivityEnabled]);
@@ -61,6 +67,11 @@ export default function App() {
               <button onClick={start}>Start collector</button>
             </>
           )}
+          {logging.status?.enabled && (
+            <span className="rec-badge" title="The activity log is on; see Overview">
+              <span className="dot rec" aria-hidden="true" /> Recording
+            </span>
+          )}
         </div>
       </header>
 
@@ -86,7 +97,13 @@ export default function App() {
       )}
 
       {/* Adapter counters need no administrator rights, so they are there even before the collector starts. */}
-      {!connected && <NetworkView net={net} standalone />}
+      {!connected && (
+        <>
+          <Overview connected={false} memory={null} processes={null} profile={null} net={net} onStart={start} onGoTo={() => {}} />
+          <LoggingCard status={logging.status} error={logging.error} connected={false} onSet={logging.set} onOpenFolder={logging.openFolder} />
+          <NetworkView net={net} standalone />
+        </>
+      )}
 
       {connected && (
         <>
@@ -106,6 +123,12 @@ export default function App() {
             ))}
           </div>
           <div role="tabpanel" id="panel" aria-labelledby={`tab-${tab}`}>
+            {tab === "overview" && (
+              <>
+                <Overview connected memory={memory} processes={processes} profile={profile} net={net} onStart={start} onGoTo={setTab} />
+                <LoggingCard status={logging.status} error={logging.error} connected onSet={logging.set} onOpenFolder={logging.openFolder} />
+              </>
+            )}
             {tab === "memory" && (
               <>
                 {memory ? <MemoryView memory={memory} processes={processes} /> : <p className="dim">Waiting for the first reading…</p>}

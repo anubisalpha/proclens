@@ -157,6 +157,20 @@ from the collector's kernel trace; the trace runs only while the Disk or Drivers
 the "This PC" profile with live self-tests (including a real ETW workload test at collector
 startup), launch via UAC, shutdown. See `SPIKE_FINDINGS.md`.
 
+**Overview** (new, the first thing you see): a few plain sentences and tiles for memory, network and
+this PC's verification status; with the collector not running it shows what needs no administrator
+rights (network) and offers to start it.
+
+**Activity log** (new, off until you switch it on): a JSON-lines record the app writes while it is
+open, every 5, 10, 20, 30, 45 or 60 seconds as you choose, to `%LOCALAPPDATA%\ProcLens\logs`, one file per
+UTC day, kept 28 days and at most 1 GB (so 5-second samples, about 48 MB a day, keep about 21 days). Each sample has memory and network numbers plus the busiest
+programs, files and drivers, so the files contain program names and file paths (never network
+addresses). Switching it on also keeps the kernel trace running, because disk and driver activity
+are part of what it records. Tested here by switching it on in the app, reading the file it wrote,
+and switching it off (start and stop lines, samples with real rates, nothing written while off);
+the field list is in `app/src-tauri/src/logger.rs`. Anomaly detection is scoped in
+`docs/ANOMALY_DETECTION.md`, not built.
+
 **Network** (adapters only): per-adapter link state, speed, receive and send rates and totals,
 read by the app itself with `GetIfTable2`, so it works before the collector is started and needs no
 administrator approval. The counters were checked against Windows' own `Get-NetAdapterStatistics`

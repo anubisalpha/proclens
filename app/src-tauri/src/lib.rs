@@ -4,6 +4,7 @@
 //! One thread owns the pipe connection. It forwards collector data to the web UI as events and
 //! carries UI commands (subscribe, shutdown) to the collector.
 
+pub mod logger;
 pub mod network;
 mod update;
 
@@ -131,6 +132,7 @@ fn serve_connection(app: &AppHandle, mut conn: Connection) {
             },
         );
     }
+    app.state::<logger::Logger>().set_collector(true);
     let _ = conn.send(&Request::Subscribe { topic: Topic::Memory, interval_ms: 1000 });
     let _ = conn.send(&Request::Subscribe { topic: Topic::Processes, interval_ms: 2000 });
     let _ = conn.send(&Request::Snapshot { topic: Topic::Profile });
@@ -145,15 +147,18 @@ fn serve_connection(app: &AppHandle, mut conn: Connection) {
         }
         match conn.poll(Duration::from_millis(50)) {
             Ok(Poll::Message(Response::Memory(m))) => {
+                app.state::<logger::Logger>().feed_memory(&m);
                 let _ = app.emit("memory", m);
             }
             Ok(Poll::Message(Response::Processes(p))) => {
+                app.state::<logger::Logger>().feed_processes(&p);
                 let _ = app.emit("processes", p);
             }
             Ok(Poll::Message(Response::Profile(p))) => {
                 let _ = app.emit("profile", p);
             }
             Ok(Poll::Message(Response::Activity(a))) => {
+                app.state::<logger::Logger>().feed_activity(&a);
                 let _ = app.emit("activity", a);
             }
             Ok(Poll::Message(Response::Error { message })) => {
@@ -165,6 +170,7 @@ fn serve_connection(app: &AppHandle, mut conn: Connection) {
     }
 
     *link.tx.lock().unwrap() = None;
+    app.state::<logger::Logger>().set_collector(false);
     link.launched_by_us.store(false, Ordering::SeqCst);
     let reason = (!asked_to_stop).then(|| "The collector stopped.".to_string());
     set_status(app, Status::Disconnected { reason });
@@ -242,11 +248,18 @@ pub fn run() {
             busy: AtomicBool::new(false),
             launched_by_us: AtomicBool::new(false),
         })
+        .manage(logger::Logger::new(
+            logger::Logger::default_dir().unwrap_or_else(|| std::env::temp_dir().join("ProcLens-logs")),
+            env!("CARGO_PKG_VERSION"),
+        ))
         .invoke_handler(tauri::generate_handler![
             get_status,
             start_collector,
             stop_collector,
             set_activity,
+            logger::log_status,
+            logger::log_set,
+            logger::log_open_folder,
             network::network_snapshot,
             network::network_selftest,
             update::check_for_update,
@@ -256,6 +269,12 @@ pub fn run() {
         .setup(|app| {
             // If a collector is already running (started by hand), attach silently.
             let _ = spawn_link(app.handle(), false);
+            // The activity log's sampler. Idle (one cheap check a second) until the user switches logging on.
+            let handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(Duration::from_secs(1));
+                logger::tick(&handle, &handle.state::<logger::Logger>());
+            });
             Ok(())
         })
         .on_window_event(|window, event| {

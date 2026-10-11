@@ -141,6 +141,19 @@ export interface NetworkSnapshot {
   adapters: NetworkAdapter[];
 }
 
+/** State of the optional activity log; mirrors the app's `logger::LogStatus`. */
+export interface LogStatus {
+  enabled: boolean;
+  interval_s: number;
+  dir: string;
+  file: string | null;
+  lines: number;
+  error: string | null;
+  /** Retention rules, stated by the app so the card never hard-codes them. */
+  keep_days: number;
+  cap_mb: number;
+}
+
 export interface NetworkSelfTest {
   ok: boolean;
   detail: string;
