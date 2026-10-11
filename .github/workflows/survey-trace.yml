@@ -162,6 +162,56 @@ jobs:
           [IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, (($md -join "`n") + "`n"), $utf8)
           $md | Out-Host
 
+      # The answer to "why can't this image name its DPC/ISR events" should be visible here: the kernel
+      # event schemas live in WMI (root\wmi), so the dump says whether the PerfInfo classes exist at all.
+      # The full dump goes in the artifact; compare two with tools\diff-etw-schema.ps1.
+      - name: ETW schema dump
+        id: schema
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $utf8 = New-Object Text.UTF8Encoding $false
+          $out = Join-Path $env:RUNNER_TEMP 'trace'
+          New-Item -ItemType Directory -Force $out | Out-Null
+          $name = '${{ steps.trace.outputs.name }}'
+          if (-not $name) { $name = 'trace-unnamed-${{ matrix.os }}' }
+          $file = Join-Path $out "$name-etw-schema.json"
+          & .\tools\dump-etw-schema.ps1 -Out $file
+          if (-not (Test-Path $file)) { throw 'the schema dump produced no file' }
+
+          Add-Type -AssemblyName System.Web.Extensions
+          $ser = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+          $ser.MaxJsonLength = [int]::MaxValue
+          $ser.RecursionLimit = 200
+          $doc = $ser.DeserializeObject([IO.File]::ReadAllText($file))
+          function Q($q, [string]$k) { if ($q.ContainsKey($k)) { $v = $q[$k]; if ($v -is [array] -or $v -is [System.Collections.ArrayList]) { ($v | ForEach-Object { "$_" }) -join ',' } else { "$v" } } else { '' } }
+
+          $md = @('### ETW schema in WMI (root\wmi)', '')
+          $md += "$($doc['counts']['mofEtwClasses']) kernel/MOF event classes of $($doc['counts']['wmiClassesTotal']) classes in root\wmi; $($doc['counts']['manifestProviders']) manifest providers dumped."
+          $md += ''
+          $md += '| family | classes | root class GUID (version) |'
+          $md += '|---|---|---|'
+          foreach ($fam in 'FileIo', 'DiskIo', 'PerfInfo', 'Thread', 'TcpIp', 'UdpIp') {
+            $in = @($doc['mof'] | Where-Object { $_['name'] -eq $fam -or $_['name'] -like "${fam}_*" -or $_['parent'] -like "${fam}*" })
+            # The root of a family is the class that carries the GUID: PerfInfo itself, but Thread_V2 (there is no plain Thread).
+            $root = $doc['mof'] | Where-Object { ($_['name'] -eq $fam -or $_['name'] -like "${fam}_V*") -and (Q $_['qualifiers'] 'Guid') } |
+              Sort-Object { [int](Q $_['qualifiers'] 'EventVersion') } -Descending | Select-Object -First 1
+            $g = if ($root) { "$(Q $root['qualifiers'] 'Guid') ($($root['name']), v$(Q $root['qualifiers'] 'EventVersion'))" } else { 'NOT PRESENT' }
+            $md += "| $fam | $($in.Count) | $g |"
+          }
+          $md += ''
+          $md += 'DPC/ISR classes ProcLens decodes (event type numbers in brackets):'
+          $md += '```'
+          foreach ($want in 'DPC', 'ISR', 'ISR_MSI') {
+            $c = $doc['mof'] | Where-Object { $_['name'] -eq $want } | Select-Object -First 1
+            if ($c) {
+              $fields = ($c['properties'] | ForEach-Object { "$($_['name'])" }) -join ', '
+              $md += "$want [$(Q $c['qualifiers'] 'EventType')]  fields: $fields"
+            } else { $md += "$want : NOT PRESENT in root\wmi" }
+          }
+          $md += '```'
+          $md | Out-Host
+          [IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, (($md -join "`n") + "`n"), $utf8)
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always() && steps.trace.outputs.name != ''
         with:
