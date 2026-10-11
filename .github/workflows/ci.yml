@@ -97,7 +97,7 @@ jobs:
           if (-not (Test-Path (Join-Path $dir 'unins000.exe'))) { $problems += 'missing after install: unins000.exe' }
 
           Write-Host '--- Start menu folder and Apps & features entry'
-          foreach ($n in 'ProcLens', 'README', 'Release notes', 'Check this PC (discover)', 'Uninstall ProcLens') {
+          foreach ($n in 'ProcLens', 'ProcLens README', 'ProcLens Release notes', 'ProcLens - Check this PC', 'Uninstall ProcLens') {
               if (-not (Test-Path (Join-Path $startMenu "aity\ProcLens\$n.lnk"))) { $problems += "missing Start menu shortcut: aity\ProcLens\$n" }
           }
           if (Test-Path (Join-Path $startMenu 'ProcLens.lnk')) { $problems += 'unexpected shortcut directly in the Start menu (ProcLens.lnk)' }

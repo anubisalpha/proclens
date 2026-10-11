@@ -69,6 +69,6 @@ development builds of the app. Both are safe to delete by hand.
 ## How do I report a problem on my Windows version?
 
 Run the two diagnostic commands described in the [README](../README.md#checking-your-own-pc-profile-and-discover)
-(the Start menu has **aity > ProcLens > Check this PC (discover)** for the second) and attach the output to an
+(the Start menu has **aity > ProcLens - Check this PC** for the second) and attach the output to an
 [issue](https://github.com/anubisalpha/proclens/issues). `discover` prints event types and field names
 only.

@@ -64,16 +64,20 @@ Source: "{#RepoRoot}\installer\run-discover.ps1"; DestDir: "{app}"; Flags: ignor
 Type: files; Name: "{autoprograms}\ProcLens.lnk"
 ; Later builds used Start menu\Programs\ProcLens; it now lives under the shared aity folder.
 Type: filesandordirs; Name: "{autoprograms}\ProcLens"
+; 0.1.0-beta.5 named three shortcuts "README", "Release notes" and "Check this PC (discover)"; they now carry the ProcLens name.
+Type: files; Name: "{autoprograms}\aity\ProcLens\README.lnk"
+Type: files; Name: "{autoprograms}\aity\ProcLens\Release notes.lnk"
+Type: files; Name: "{autoprograms}\aity\ProcLens\Check this PC (discover).lnk"
 
 [Icons]
 ; {group} is Start menu\Programs\aity\ProcLens (DefaultGroupName; the group page is disabled).
 Name: "{group}\ProcLens"; Filename: "{app}\proclens-app.exe"
 ; Notepad rather than the .md file association, which may not exist.
-Name: "{group}\README"; Filename: "{sys}\notepad.exe"; Parameters: """{app}\README.md"""
-Name: "{group}\Release notes"; Filename: "{sys}\notepad.exe"; Parameters: """{app}\RELEASE-NOTES.md"""
+Name: "{group}\ProcLens README"; Filename: "{sys}\notepad.exe"; Parameters: """{app}\README.md"""; IconFilename: "{app}\proclens-app.exe"
+Name: "{group}\ProcLens Release notes"; Filename: "{sys}\notepad.exe"; Parameters: """{app}\RELEASE-NOTES.md"""; IconFilename: "{app}\proclens-app.exe"
 ; discover needs administrator rights; the script asks for them (one UAC prompt) and keeps its
 ; window open so the output can be read and copied.
-Name: "{group}\Check this PC (discover)"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\run-discover.ps1"""; WorkingDir: "{app}"; IconFilename: "{app}\collector.exe"; Comment: "Compare this Windows build's ETW event tables with ProcLens's profile"
+Name: "{group}\ProcLens - Check this PC"; Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\run-discover.ps1"""; WorkingDir: "{app}"; IconFilename: "{app}\proclens-app.exe"; Comment: "Compare this Windows build's ETW event tables with ProcLens's profile"
 Name: "{group}\Uninstall ProcLens"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\ProcLens"; Filename: "{app}\proclens-app.exe"; Tasks: desktopicon
 

@@ -27,7 +27,7 @@ its notes first: this is a beta, verified on one PC only. Compare the file's SHA
 
 - **`proclens-<version>-windows-x64-setup.exe` (recommended).** Asks for administrator approval and
   installs for all users to `C:\Program Files\ProcLens`, with a ProcLens folder inside the shared **aity** folder in the Start menu
-  (ProcLens, README, Release notes, Check this PC (discover), Uninstall), a desktop shortcut
+  (ProcLens, ProcLens README, ProcLens Release notes, ProcLens - Check this PC, Uninstall ProcLens), a desktop shortcut
   (ticked by default; untick it to skip) and an uninstaller under Apps & features. There is deliberately no per-user install: the
   app starts `collector.exe` from its own folder with administrator rights, so that folder must not be
   writable by ordinary programs. Setup and the uninstaller ask you to close ProcLens first if it is open.
@@ -66,7 +66,7 @@ cargo test --workspace                       # protocol framing, profile matchin
 ## Checking your own PC: `profile` and `discover`
 
 The collector has two diagnostic commands that need no UI. On an installed copy, the Start menu's
-**aity > ProcLens > Check this PC (discover)** runs `discover` for you (one UAC prompt, window stays open).
+**aity > ProcLens - Check this PC** runs `discover` for you (one UAC prompt, window stays open).
 Otherwise run them from `C:\Program Files\ProcLens`; from a source checkout use
 `.\target\release\collector.exe`.
 
