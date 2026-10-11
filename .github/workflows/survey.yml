@@ -4,10 +4,15 @@
 # profile match and self-tests) and an elevated `collector discover` (the ETW event tables this build
 # really sends, compared with the built-in profile), and uploads them. Nothing is published.
 #
+# Files and the artifact are named from the full OS name, version, build and architecture, plus the
+# image label (two labels can be the same OS, e.g. windows-2025 and windows-2025-vs2026):
+#   survey-Windows-Server-2025-Datacenter-24H2-build-26100.33438-x64-windows-2025
+#
 # What this can and cannot tell us: these are Windows *Server* images (and Windows 11 on arm64) running
 # as virtual machines. A failed trace self-test here may be the VM, not the Windows build, so treat
 # results as evidence about "does it run and what does the build send", not as verification of a
 # profile. Verification is still done by hand on real hardware (see docs/REFERENCES.md).
+# See survey-trace.yml for the follow-up that probes the DPC/ISR question directly.
 name: Survey Windows images
 
 on:
@@ -57,19 +62,30 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)" }
 
       - name: Survey
+        id: survey
         run: |
           $ErrorActionPreference = 'Continue'
+          $utf8 = New-Object Text.UTF8Encoding $false   # PowerShell 5.1's Tee-Object, > and Out-File default to UTF-16
           $out = Join-Path $env:RUNNER_TEMP 'survey'
           New-Item -ItemType Directory -Force $out | Out-Null
           $exe = (Resolve-Path 'target\release\collector.exe').Path
 
-          # --- the machine
+          # --- the machine, and the name every output is given
           $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+          $product = $cv.ProductName
+          # Windows 11 still reports "Windows 10 ..." in this registry value; the build number tells them apart.
+          if ([int]$cv.CurrentBuild -ge 22000 -and $product -like 'Windows 10*') { $product = $product -replace '^Windows 10', 'Windows 11' }
+          $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
+          $base = ("$product $($cv.DisplayVersion) build $($cv.CurrentBuild).$($cv.UBR) $arch ${{ matrix.os }}") -replace '[^A-Za-z0-9._]+', '-' -replace '^-|-$', ''
+          [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "name=survey-$base`n", $utf8)
+          "file prefix: $base"
+          function Out-Part([string]$suffix) { Join-Path $out "$base-$suffix" }
+
           $cs = Get-CimInstance Win32_ComputerSystem
           $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-          @(
+          $os = @(
             "image label:      ${{ matrix.os }}"
-            "ProductName:      $($cv.ProductName)"
+            "ProductName:      $product (registry says: $($cv.ProductName))"
             "Edition:          $($cv.EditionID)"
             "DisplayVersion:   $($cv.DisplayVersion)"
             "Build.UBR:        $($cv.CurrentBuild).$($cv.UBR)"
@@ -81,41 +97,43 @@ jobs:
             "RAM (GB):         $([math]::Round($cs.TotalPhysicalMemory / 1GB, 1))"
             "Runner is admin:  $isAdmin"
             "Image version:    $env:ImageVersion"
-          ) | Tee-Object (Join-Path $out 'os.txt')
+          )
+          [IO.File]::WriteAllLines((Out-Part 'os.txt'), $os, $utf8)
+          $os
 
           # --- collector profile (build, profile match, self-tests)
           "=== collector profile"
           # cmd does the redirection: PowerShell 5.1's `>` and `*>` write UTF-16 and mangle native stderr.
-          cmd /c "`"$exe`" profile > `"$(Join-Path $out 'profile.txt')`" 2>&1"
-          "profile exit code: $LASTEXITCODE" | Add-Content -Encoding utf8 (Join-Path $out 'profile.txt')
-          Get-Content (Join-Path $out 'profile.txt')
+          cmd /c "`"$exe`" profile > `"$(Out-Part 'profile.txt')`" 2>&1"
+          "profile exit code: $LASTEXITCODE" | Add-Content -Encoding utf8 (Out-Part 'profile.txt')
+          Get-Content (Out-Part 'profile.txt')
 
           # --- collector discover (needs an elevated process)
           "=== collector discover"
-          cmd /c "`"$exe`" discover --emit `"$(Join-Path $out 'discover-profile.json')`" > `"$(Join-Path $out 'discover.txt')`" 2>&1"
-          "discover exit code: $LASTEXITCODE" | Add-Content -Encoding utf8 (Join-Path $out 'discover.txt')
-          Get-Content (Join-Path $out 'discover.txt')
+          cmd /c "`"$exe`" discover --emit `"$(Out-Part 'discover-profile.json')`" > `"$(Out-Part 'discover.txt')`" 2>&1"
+          "discover exit code: $LASTEXITCODE" | Add-Content -Encoding utf8 (Out-Part 'discover.txt')
+          Get-Content (Out-Part 'discover.txt')
 
           # --- a readable summary on the run page
           $md = @()
-          $md += "## Survey: ${{ matrix.os }}"
+          $md += "## Survey: $product $($cv.DisplayVersion) build $($cv.CurrentBuild).$($cv.UBR) $arch (${{ matrix.os }})"
           $md += '```'
-          $md += Get-Content (Join-Path $out 'os.txt')
+          $md += $os
           $md += '```'
           $md += '### collector profile'
           $md += '```'
-          $md += Get-Content (Join-Path $out 'profile.txt') | Select-Object -First 40
+          $md += Get-Content (Out-Part 'profile.txt') | Select-Object -First 40
           $md += '```'
           $md += '### collector discover (first 80 lines; the full output and the draft profile are in the artifact)'
           $md += '```'
-          $md += Get-Content (Join-Path $out 'discover.txt') | Select-Object -First 80
+          $md += Get-Content (Out-Part 'discover.txt') | Select-Object -First 80
           $md += '```'
-          [IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, (($md -join "`n") + "`n"), (New-Object Text.UTF8Encoding $false))
+          [IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, (($md -join "`n") + "`n"), $utf8)
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
+        if: always() && steps.survey.outputs.name != ''
         with:
-          name: survey-${{ matrix.os }}
+          name: ${{ steps.survey.outputs.name }}
           path: ${{ runner.temp }}/survey
           retention-days: 30
           if-no-files-found: warn

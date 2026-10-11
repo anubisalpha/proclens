@@ -1,0 +1,171 @@
+# Manual only: the follow-up survey for one open question from survey.yml.
+#
+# Question: on Windows Server 2025 (build 26100) ProcLens sees NO DPC or ISR events, while Server 2022
+# and Windows 11 25H2 arm64 send them in the format the Windows 10 profile expects. Is that the OS, the
+# virtual machine, or something in ProcLens?
+#
+# For each image it (1) records the virtualization facts, (2) captures a kernel trace with Windows' own
+# `logman` and counts events with `tracerpt`, so the answer does not depend on ProcLens code, with a
+# control trace of process and thread events that must work, and (3) runs `collector etw` under the same
+# load to see what ProcLens receives. If tracerpt sees DPC/ISR events and the collector does not, the
+# problem is ours; if neither does, the image does not emit them.
+#
+# windows-2022 and windows-11-arm are the controls (DPC/ISR worked there). Same naming as survey.yml.
+# These are virtual machines: nothing here verifies a profile for real hardware.
+name: Survey kernel trace (DPC/ISR)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  trace:
+    name: trace (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-2025, experimental: false }
+          - { os: windows-2022, experimental: false }
+          - { os: windows-11-arm, experimental: true }
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: survey-${{ matrix.os }}
+
+      - name: Build the collector
+        run: |
+          cargo build --release -p collector --locked
+          if ($LASTEXITCODE -ne 0) { throw "cargo build failed ($LASTEXITCODE)" }
+
+      - name: Trace survey
+        id: trace
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $utf8 = New-Object Text.UTF8Encoding $false
+          $out = Join-Path $env:RUNNER_TEMP 'trace'
+          New-Item -ItemType Directory -Force $out | Out-Null
+          $exe = (Resolve-Path 'target\release\collector.exe').Path
+
+          # --- name (same scheme as survey.yml)
+          $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+          $product = $cv.ProductName
+          if ([int]$cv.CurrentBuild -ge 22000 -and $product -like 'Windows 10*') { $product = $product -replace '^Windows 10', 'Windows 11' }
+          $arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { 'arm64' } else { 'x64' }
+          $base = ("$product $($cv.DisplayVersion) build $($cv.CurrentBuild).$($cv.UBR) $arch ${{ matrix.os }}") -replace '[^A-Za-z0-9._]+', '-' -replace '^-|-$', ''
+          [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "name=trace-$base`n", $utf8)
+          function Out-Part([string]$suffix) { Join-Path $out "$base-$suffix" }
+          $md = @("## Kernel trace survey: $product $($cv.DisplayVersion) build $($cv.CurrentBuild).$($cv.UBR) $arch (${{ matrix.os }})")
+
+          # --- 1. virtualization facts
+          $v = @()
+          $cs = Get-CimInstance Win32_ComputerSystem
+          $v += "Manufacturer / Model:   $($cs.Manufacturer) / $($cs.Model)"
+          $v += "HypervisorPresent:      $($cs.HypervisorPresent)"
+          $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+          $v += "Processor:              $($cpu.Name)"
+          $v += "VirtualizationFirmwareEnabled: $($cpu.VirtualizationFirmwareEnabled)"
+          try {
+            $dg = Get-CimInstance -ClassName Win32_DeviceGuard -Namespace root\Microsoft\Windows\DeviceGuard -ErrorAction Stop
+            $v += "VBS status (0 off, 1 configured, 2 running): $($dg.VirtualizationBasedSecurityStatus)"
+            $v += "Security services running: $($dg.SecurityServicesRunning -join ',')"
+            $v += "Security services configured: $($dg.SecurityServicesConfigured -join ',')"
+          } catch { $v += "Win32_DeviceGuard: not available ($($_.Exception.Message))" }
+          $v += "--- bcdedit {current} (hypervisor and boot settings)"
+          $v += (bcdedit /enum '{current}' 2>&1 | Select-String -Pattern 'hypervisor|debug|bootmenu|nx|quietboot|useplatform|tscsync|disabledynamictick' | ForEach-Object { $_.Line })
+          $gp = 'HKLM:\SOFTWARE\Microsoft\Virtual Machine\Guest\Parameters'
+          if (Test-Path $gp) {
+            $v += "--- Hyper-V guest parameters (host OS version only; names and ids left out)"
+            (Get-ItemProperty $gp).PSObject.Properties | Where-Object { $_.Name -match '^HostingSystem(OsMajor|OsMinor|EditionId|NtBuild)' } | ForEach-Object { $v += "$($_.Name) = $($_.Value)" }
+          }
+          [IO.File]::WriteAllLines((Out-Part 'virtualization.txt'), $v, $utf8)
+          $v
+          $md += '### Virtualization'; $md += '```'; $md += $v; $md += '```'
+
+          # --- 2. kernel traces with Windows' own tools
+          function Start-Load {
+            Start-Job -ScriptBlock {
+              $f = Join-Path $env:RUNNER_TEMP 'trace-load.bin'
+              $b = New-Object byte[] (4MB)
+              1..5 | ForEach-Object {
+                [IO.File]::WriteAllBytes($f, $b); [void][IO.File]::ReadAllBytes($f)
+                try { [void](Invoke-WebRequest https://github.com -UseBasicParsing -TimeoutSec 10) } catch {}
+              }
+            }
+          }
+          $sets = @(
+            @{ name = 'control-process-thread'; flags = '(process,thread)' },
+            @{ name = 'dpc-and-isr';            flags = '(dpc,isr)' },
+            @{ name = 'dpc-only';               flags = '(dpc)' },
+            @{ name = 'isr-only';                flags = '(isr)' }
+          )
+          $table = @('| trace | flags | logman start | events in tracerpt summary | PerfInfo events (count, opcode name) |', '|---|---|---|---|---|')
+          foreach ($s in $sets) {
+            $etl = Out-Part "$($s.name).etl"
+            $log = Out-Part "$($s.name)-logman.txt"
+            "=== $($s.name) $($s.flags)"
+            # A leftover session from an earlier step would make the start fail.
+            logman stop 'NT Kernel Logger' -ets 2>&1 | Out-Null
+            cmd /c "logman start `"NT Kernel Logger`" -p `"Windows Kernel Trace`" `"$($s.flags)`" -o `"$etl`" -ets -bs 128 -nb 16 128 > `"$log`" 2>&1"
+            $startCode = $LASTEXITCODE
+            $job = Start-Load
+            Wait-Job $job -Timeout 8 | Out-Null
+            Stop-Job $job -ErrorAction SilentlyContinue; Remove-Job $job -Force -ErrorAction SilentlyContinue
+            cmd /c "logman stop `"NT Kernel Logger`" -ets >> `"$log`" 2>&1"
+            $summary = Out-Part "$($s.name)-tracerpt-summary.txt"
+            if (Test-Path $etl) {
+              cmd /c "tracerpt `"$etl`" -o `"$(Out-Part "$($s.name)-events.csv")`" -summary `"$summary`" -of CSV -y > `"$(Out-Part "$($s.name)-tracerpt.txt")`" 2>&1"
+            }
+            $total = 'n/a'; $mentions = 'n/a'
+            if (Test-Path $summary) {
+              $text = Get-Content $summary -ErrorAction SilentlyContinue
+              $line = $text | Select-String -Pattern 'Total Buffers|Events Lost|Total Events' | Select-Object -First 3
+              $total = ($line | ForEach-Object { $_.Line.Trim() }) -join '; '
+              # Event rows look like "  4977   PerfInfo   0   DPC   2   {guid}"; keep those, not the .etl path line.
+              $m = $text | Select-String -Pattern '\sPerfInfo\s' | ForEach-Object { ($_.Line.Trim() -replace '\{[0-9a-fA-F-]+\}', '' -replace '[|]', ' ' -replace '\s+', ' ').Trim() }
+              $mentions = if ($m) { ($m | Select-Object -First 8) -join ' / ' } else { 'no PerfInfo (DPC/ISR) events' }
+            }
+            # The large CSV is only for looking at by hand; keep the artifact small.
+            Remove-Item (Out-Part "$($s.name)-events.csv") -ErrorAction SilentlyContinue
+            Remove-Item $etl -ErrorAction SilentlyContinue
+            $table += "| $($s.name) | ``$($s.flags)`` | exit $startCode | $total | $mentions |"
+          }
+          $md += '### Windows'' own tools: logman + tracerpt'
+          $md += $table
+          $md += ''
+          $md += '(The tracerpt summaries are in the artifact; the .etl files are not kept.)'
+
+          # --- 3. what ProcLens receives under the same kind of load
+          "=== collector etw 6 under load"
+          $job = Start-Load
+          cmd /c "`"$exe`" etw 6 > `"$(Out-Part 'collector-etw.txt')`" 2>&1"
+          "collector etw exit code: $LASTEXITCODE" | Add-Content -Encoding utf8 (Out-Part 'collector-etw.txt')
+          Stop-Job $job -ErrorAction SilentlyContinue; Remove-Job $job -Force -ErrorAction SilentlyContinue
+          $etw = Get-Content (Out-Part 'collector-etw.txt')
+          $perf = $etw | Select-String -Pattern 'PerfInfo|TOTAL_DPC|TOTAL_ISR|events lost' | ForEach-Object { $_.Line.Trim() }
+          $md += '### collector etw 6 (what ProcLens receives)'
+          $md += '```'
+          $md += $(if ($perf) { $perf } else { 'no PerfInfo lines in the report' })
+          $md += '```'
+          [IO.File]::AppendAllText($env:GITHUB_STEP_SUMMARY, (($md -join "`n") + "`n"), $utf8)
+          $md | Out-Host
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always() && steps.trace.outputs.name != ''
+        with:
+          name: ${{ steps.trace.outputs.name }}
+          path: ${{ runner.temp }}/trace
+          retention-days: 30
+          if-no-files-found: warn
