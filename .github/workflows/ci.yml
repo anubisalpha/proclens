@@ -98,9 +98,10 @@ jobs:
 
           Write-Host '--- Start menu folder and Apps & features entry'
           foreach ($n in 'ProcLens', 'README', 'Release notes', 'Check this PC (discover)', 'Uninstall ProcLens') {
-              if (-not (Test-Path (Join-Path $startMenu "ProcLens\$n.lnk"))) { $problems += "missing Start menu shortcut: ProcLens\$n" }
+              if (-not (Test-Path (Join-Path $startMenu "aity\ProcLens\$n.lnk"))) { $problems += "missing Start menu shortcut: aity\ProcLens\$n" }
           }
           if (Test-Path (Join-Path $startMenu 'ProcLens.lnk')) { $problems += 'unexpected shortcut directly in the Start menu (ProcLens.lnk)' }
+          if (Test-Path (Join-Path $startMenu 'ProcLens')) { $problems += 'unexpected top-level ProcLens folder in the Start menu (it lives under aity now)' }
           # The desktop shortcut task is ticked by default, so a silent install creates it.
           $desktopLink = Join-Path $env:PUBLIC 'Desktop\ProcLens.lnk'
           if (-not (Test-Path $desktopLink)) { $problems += 'missing desktop shortcut (the task should be ticked by default)' }
@@ -118,7 +119,7 @@ jobs:
           while ((Test-Path $uninstallKey) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
           Start-Sleep -Seconds 5
           if (Test-Path $uninstallKey) { $problems += 'uninstall registry entry still present' }
-          if (Test-Path (Join-Path $startMenu 'ProcLens')) { $problems += 'Start menu folder still present after uninstall' }
+          if (Test-Path (Join-Path $startMenu 'aity\ProcLens')) { $problems += 'Start menu folder still present after uninstall' }
           if (Test-Path $desktopLink) { $problems += 'desktop shortcut still present after uninstall' }
           foreach ($leftover in 'proclens-app.exe', 'collector.exe', 'run-discover.ps1', 'unins000.exe') {
               if (Test-Path (Join-Path $dir $leftover)) { $problems += "still present after uninstall: $leftover" }
