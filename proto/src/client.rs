@@ -17,23 +17,32 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use windows::core::{w, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
+use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
 use windows::Win32::System::Pipes::{GetNamedPipeServerProcessId, PeekNamedPipe};
 use windows::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+    GetCurrentProcess, OpenProcess, OpenProcessToken, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+    PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Shell::{ShellExecuteExW, SHELLEXECUTEINFOW};
 use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
-use crate::frame::{read_frame, write_frame};
+use crate::frame::{write_frame, FrameReader};
 use crate::{Request, Response, PIPE_NAME, PROTOCOL_VERSION};
 
 const ERROR_FILE_NOT_FOUND: i32 = 2;
 const ERROR_PIPE_BUSY: i32 = 231;
 const ERROR_CANCELLED: i32 = 1223;
 
+/// How long the collector gets to answer Hello.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+/// A peer that has started a frame must finish it within this long.
+const FRAME_STALL: Duration = Duration::from_secs(5);
+
 pub struct Connection {
     file: File,
+    reader: FrameReader,
     pub server_pid: u32,
     /// The collector's HelloAck.
     pub ack: Response,
@@ -49,10 +58,18 @@ impl Connection {
     /// Don't call this from a thread that also needs to [`send`](Self::send): a blocked read on a
     /// synchronous pipe handle stalls writes. Use [`poll`](Self::poll) from a single I/O thread.
     pub fn recv(&mut self) -> io::Result<Option<Response>> {
-        read_frame(&mut self.file)
+        loop {
+            match self.poll(Duration::from_millis(250))? {
+                Poll::Message(r) => return Ok(Some(r)),
+                Poll::Closed => return Ok(None),
+                Poll::Nothing => {}
+            }
+        }
     }
 
-    /// Waits up to `timeout` for a message without blocking writes for longer than that.
+    /// Waits up to `timeout` for a message without blocking writes for longer than that. It only
+    /// ever reads bytes that are already waiting, so a collector that stops halfway through a
+    /// message cannot hang the caller: after [`FRAME_STALL`] that is reported as `TimedOut`.
     pub fn poll(&mut self, timeout: Duration) -> io::Result<Poll> {
         let deadline = Instant::now() + timeout;
         loop {
@@ -63,11 +80,11 @@ impl Connection {
             if peek.is_err() {
                 return Ok(Poll::Closed); // broken pipe: the collector went away
             }
-            if avail > 0 {
-                return Ok(match read_frame(&mut self.file)? {
-                    Some(r) => Poll::Message(r),
-                    None => Poll::Closed,
-                });
+            if let Some(r) = self.reader.poll(&mut self.file, avail as usize)? {
+                return Ok(Poll::Message(r));
+            }
+            if self.reader.stalled_for().is_some_and(|d| d > FRAME_STALL) {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "the collector stopped in the middle of a message"));
             }
             if Instant::now() >= deadline {
                 return Ok(Poll::Nothing);
@@ -96,6 +113,7 @@ pub fn connect(expected_server_exe: &Path, client_name: &str) -> io::Result<Conn
 
     let mut conn = Connection {
         file,
+        reader: FrameReader::new(),
         server_pid: pid,
         ack: Response::Bye, // replaced below
     };
@@ -103,7 +121,12 @@ pub fn connect(expected_server_exe: &Path, client_name: &str) -> io::Result<Conn
         protocol_version: PROTOCOL_VERSION,
         client: client_name.to_string(),
     })?;
-    match conn.recv()? {
+    let reply = match conn.poll(HANDSHAKE_TIMEOUT)? {
+        Poll::Message(r) => Some(r),
+        Poll::Closed => None,
+        Poll::Nothing => return Err(io::Error::new(io::ErrorKind::TimedOut, "the collector did not answer Hello")),
+    };
+    match reply {
         Some(ack @ Response::HelloAck { protocol_version, collector_pid, .. }) => {
             if protocol_version != PROTOCOL_VERSION {
                 return Err(io::Error::new(
@@ -166,6 +189,32 @@ fn verify_server_image(pid: u32, expected: &Path) -> io::Result<()> {
             io::ErrorKind::PermissionDenied,
             format!("pipe is served by pid {pid} ({actual}), not the expected collector"),
         ))
+    }
+}
+
+/// The current user's SID as a string like `S-1-5-21-...`. The unelevated UI passes this to the
+/// collector it launches, because the elevated process can run under a *different* account (a
+/// standard user approving the UAC prompt with an administrator's credentials).
+pub fn current_user_sid() -> io::Result<String> {
+    unsafe {
+        let mut token = HANDLE::default();
+        OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).map_err(io::Error::other)?;
+        let result = (|| {
+            let mut needed = 0u32;
+            let _ = GetTokenInformation(token, TokenUser, None, 0, &mut needed); // asks for the size
+            // u64 elements: TOKEN_USER holds a pointer, so the buffer must be 8-byte aligned.
+            let mut buf = vec![0u64; (needed as usize).div_ceil(8).max(1)];
+            GetTokenInformation(token, TokenUser, Some(buf.as_mut_ptr() as *mut _), (buf.len() * 8) as u32, &mut needed)
+                .map_err(io::Error::other)?;
+            let user = &*(buf.as_ptr() as *const TOKEN_USER);
+            let mut s = PWSTR::null();
+            ConvertSidToStringSidW(user.User.Sid, &mut s).map_err(io::Error::other)?;
+            let out = s.to_string().map_err(io::Error::other);
+            let _ = LocalFree(Some(HLOCAL(s.0 as *mut _)));
+            out
+        })();
+        let _ = CloseHandle(token);
+        result
     }
 }
 

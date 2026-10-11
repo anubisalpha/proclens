@@ -63,6 +63,11 @@ impl Version {
         };
         Some(Version { core, pre })
     }
+
+    /// True for `1.0.0-beta.1`, false for `1.0.0`.
+    pub fn is_prerelease(&self) -> bool {
+        !self.pre.is_empty()
+    }
 }
 
 /// Digits only, no sign, no leading zero (other than "0" itself), fits in u64.
@@ -110,6 +115,9 @@ struct Release {
     tag_name: String,
     #[serde(default)]
     draft: bool,
+    /// GitHub's own "pre-release" flag on the release.
+    #[serde(default)]
+    prerelease: bool,
 }
 
 /// What the footer shows after a check.
@@ -120,15 +128,19 @@ pub enum UpdateResult {
     UpdateAvailable { current: String, latest: String, tag: String },
 }
 
-/// Picks the newest published release (betas included; every ProcLens release is one) and compares
-/// it with `current`. Releases whose tag is not a version, and drafts, are ignored.
+/// Picks the newest published release and compares it with `current`. Drafts and releases whose
+/// tag is not a version are ignored. Pre-releases only count when `current` is itself a
+/// pre-release (every ProcLens release so far is a beta): someone on a stable version is not told
+/// a beta is an update.
 pub fn evaluate(current: &str, releases_json: &str) -> Result<UpdateResult, String> {
     let current_v = Version::parse(current).ok_or_else(|| format!("this app's version \"{current}\" is not a version number"))?;
     let releases: Vec<Release> = serde_json::from_str(releases_json).map_err(|_| "GitHub's reply was not the release list we expected".to_string())?;
     let newest = releases
         .iter()
         .filter(|r| !r.draft)
+        .filter(|r| current_v.is_prerelease() || !r.prerelease)
         .filter_map(|r| Version::parse(&r.tag_name).map(|v| (v, r)))
+        .filter(|(v, _)| current_v.is_prerelease() || !v.is_prerelease())
         .max_by(|a, b| a.0.cmp(&b.0));
     match newest {
         Some((v, r)) if v > current_v => Ok(UpdateResult::UpdateAvailable {
@@ -363,6 +375,27 @@ mod tests {
         match evaluate("0.1.0-beta.2", json).unwrap() {
             UpdateResult::UpdateAvailable { tag, .. } => assert_eq!(tag, "v0.1.0-beta.3"),
             other => panic!("expected beta.3, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stable_users_are_not_offered_prereleases() {
+        let json = r#"[
+          {"tag_name":"v0.2.0-beta.1","draft":false,"prerelease":true},
+          {"tag_name":"v0.1.1","draft":false,"prerelease":false},
+          {"tag_name":"v0.3.0-rc.1","draft":false}
+        ]"#;
+        // On stable 0.1.0 only the stable 0.1.1 counts; the newer-looking betas are ignored.
+        match evaluate("0.1.0", json).unwrap() {
+            UpdateResult::UpdateAvailable { tag, .. } => assert_eq!(tag, "v0.1.1"),
+            other => panic!("expected 0.1.1, got {other:?}"),
+        }
+        // Already on the newest stable: up to date, even though a beta of a later version exists.
+        assert!(matches!(evaluate("0.1.1", json).unwrap(), UpdateResult::UpToDate { .. }));
+        // A beta user still sees later betas.
+        match evaluate("0.1.0-beta.1", json).unwrap() {
+            UpdateResult::UpdateAvailable { tag, .. } => assert_eq!(tag, "v0.3.0-rc.1"),
+            other => panic!("expected the rc, got {other:?}"),
         }
     }
 

@@ -1,6 +1,7 @@
 //! Memory reconciliation: where does physical RAM actually go?
 
 use std::mem::size_of;
+use std::sync::OnceLock;
 
 use proclens_proto::{MemoryLists, MemoryStats};
 use windows::core::{w, PCWSTR};
@@ -48,22 +49,25 @@ pub fn enable_privilege(name: PCWSTR) -> Result<bool, String> {
             &mut token,
         )
         .map_err(|e| format!("OpenProcessToken: {e}"))?;
-        let mut luid = LUID::default();
-        LookupPrivilegeValueW(None, name, &mut luid)
-            .map_err(|e| format!("LookupPrivilegeValue: {e}"))?;
-        let tp = TOKEN_PRIVILEGES {
-            PrivilegeCount: 1,
-            Privileges: [LUID_AND_ATTRIBUTES {
-                Luid: luid,
-                Attributes: SE_PRIVILEGE_ENABLED,
-            }],
-        };
-        let res = AdjustTokenPrivileges(token, false, Some(&tp), 0, None, None);
-        // AdjustTokenPrivileges "succeeds" even when the privilege isn't held; check last error.
-        let not_assigned = GetLastError() == ERROR_NOT_ALL_ASSIGNED;
+        let result = (|| {
+            let mut luid = LUID::default();
+            LookupPrivilegeValueW(None, name, &mut luid)
+                .map_err(|e| format!("LookupPrivilegeValue: {e}"))?;
+            let tp = TOKEN_PRIVILEGES {
+                PrivilegeCount: 1,
+                Privileges: [LUID_AND_ATTRIBUTES {
+                    Luid: luid,
+                    Attributes: SE_PRIVILEGE_ENABLED,
+                }],
+            };
+            let res = AdjustTokenPrivileges(token, false, Some(&tp), 0, None, None);
+            // AdjustTokenPrivileges "succeeds" even when the privilege isn't held; check last error.
+            let not_assigned = GetLastError() == ERROR_NOT_ALL_ASSIGNED;
+            res.map_err(|e| format!("AdjustTokenPrivileges: {e}"))?;
+            Ok(!not_assigned)
+        })();
         let _ = CloseHandle(token);
-        res.map_err(|e| format!("AdjustTokenPrivileges: {e}"))?;
-        Ok(!not_assigned)
+        result
     }
 }
 
@@ -100,7 +104,10 @@ fn collect_lists(pi: &PERFORMANCE_INFORMATION) -> Option<MemoryLists> {
 /// otherwise produce plausible-looking nonsense. Invariant (held to within 1 MB on the verified
 /// build): free + zeroed + standby pages == "available" pages, within a small tolerance.
 fn read_lists(pi: &PERFORMANCE_INFORMATION) -> Result<(MemoryLists, String), String> {
-    if !matches!(enable_privilege(w!("SeProfileSingleProcessPrivilege")), Ok(true)) {
+    // A token privilege stays enabled for the life of the process, so ask once, not per sample.
+    static HELD: OnceLock<bool> = OnceLock::new();
+    let held = *HELD.get_or_init(|| matches!(enable_privilege(w!("SeProfileSingleProcessPrivilege")), Ok(true)));
+    if !held {
         return Err("needs an elevated process (SeProfileSingleProcessPrivilege)".into());
     }
     let mut info = SystemMemoryListInformation::default();

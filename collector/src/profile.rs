@@ -5,7 +5,9 @@
 //! - **Profiles** (`profiles/*.json`): what was verified *by hand* on which exact build, plus the
 //!   quirks found there. Supporting another PC means adding a file.
 //! - **Self-tests** (this module): what provably works on *this* machine *right now*. A failed
-//!   test is reported (This PC tab, plus a warning on the affected view) even on a build with no\n//!   profile. The memory breakdown also switches itself off per sample when its invariant fails; the\n//!   trace views keep running, so a failed check there means \
+//!   test is reported (This PC tab, plus a warning on the affected view) even on a build with no
+//!   profile. The memory breakdown also switches itself off per sample when its invariant fails; the
+//!   trace views keep running, so a failed check there means "distrust these numbers", not "off".
 
 use std::sync::{Arc, OnceLock};
 
@@ -17,6 +19,25 @@ use windows::core::{w, PCWSTR};
 use windows::Win32::System::Registry::{
     RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RRF_RT_REG_SZ,
 };
+
+/// Creates a new, empty file with an unpredictable name in the temp directory. `create_new` makes
+/// the call fail if the name already exists, so a file or link planted there by an unprivileged
+/// process of the same user (this process is elevated; `%TEMP%` is theirs to write to) is never
+/// opened, truncated or followed.
+pub fn create_private_temp(stem: &str, ext: &str) -> std::io::Result<(std::fs::File, std::path::PathBuf)> {
+    use std::hash::{BuildHasher, Hasher};
+    let mut last = None;
+    for _ in 0..16 {
+        let random = std::collections::hash_map::RandomState::new().build_hasher().finish();
+        let path = std::env::temp_dir().join(format!("{stem}-{}-{random:016x}.{ext}", std::process::id()));
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(f) => return Ok((f, path)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| std::io::Error::other("could not create a temp file")))
+}
 
 /// Profiles compiled into the binary. Add new builds here after verifying them (see
 /// `collector profile`, which prints this machine's OS info and self-test results).
@@ -215,11 +236,14 @@ fn etw_checks(profile: &Option<KnownProfile>) -> Vec<Capability> {
 
     // Known workload: write 8 MiB then read it back, so this process should be credited with
     // exactly that much (plus a little unrelated I/O of its own).
-    let name = format!("proclens-selftest-{}.bin", std::process::id());
-    let path = std::env::temp_dir().join(&name);
+    let (created, path) = match create_private_temp("proclens-selftest", "bin") {
+        Ok(c) => (Ok(c.0), c.1),
+        Err(e) => (Err(e), std::path::PathBuf::new()),
+    };
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let workload = (|| -> std::io::Result<()> {
         let chunk = vec![0xA5u8; MIB];
-        let mut f = std::fs::File::create(&path)?;
+        let mut f = created?;
         for _ in 0..CHUNKS {
             f.write_all(&chunk)?;
         }
@@ -230,7 +254,9 @@ fn etw_checks(profile: &Option<KnownProfile>) -> Vec<Capability> {
         while f.read(&mut buf)? > 0 {}
         Ok(())
     })();
-    let _ = std::fs::remove_file(&path);
+    if !name.is_empty() {
+        let _ = std::fs::remove_file(&path);
+    }
     // Events arrive in batches about a second late and later under load, so wait until this
     // process is credited with the whole workload (or give up after 6 s and let the check report
     // what it measured). A fixed 1.2 s sleep made this check flaky.

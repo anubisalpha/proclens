@@ -2,7 +2,9 @@
 //!
 //! One thread accepts connections; each client gets one thread. A client thread both reads
 //! requests and writes pushes, so it must not block in a read (a synchronous pipe handle
-//! serialises I/O: a blocked ReadFile would stall our WriteFile). It polls `PeekNamedPipe` instead.
+//! serialises I/O: a blocked ReadFile would stall our WriteFile). It polls `PeekNamedPipe` instead
+//! and feeds only the bytes already waiting to a `FrameReader`, so a peer that stops halfway
+//! through a frame is dropped after `FRAME_STALL` instead of hanging its thread.
 //!
 //! The kernel trace behind [`Topic::Activity`] is expensive (it sees ~10^5 events/s and uses
 //! nonpaged buffers), so it only runs while at least one client is subscribed.
@@ -16,7 +18,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use proclens_proto::frame::{read_frame, write_frame};
+use proclens_proto::frame::{is_desync, write_frame, FrameReader};
 use proclens_proto::{ActivitySnapshot, Request, Response, Topic, ACTIVITY_INTERVAL_MS, PIPE_NAME, PROTOCOL_VERSION};
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::Pipes::PeekNamedPipe;
@@ -29,6 +31,10 @@ use crate::trace::{driver_table, TraceSession};
 
 const POLL: Duration = Duration::from_millis(20);
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
+/// A client that has started a frame must finish it within this long.
+const FRAME_STALL: Duration = Duration::from_secs(5);
+/// More simultaneous connections than this are closed at once (one thread each otherwise).
+const MAX_CLIENTS: usize = 16;
 const MIN_INTERVAL_MS: u32 = 250;
 const MAX_INTERVAL_MS: u32 = 60_000;
 
@@ -205,9 +211,9 @@ fn tick_loop(shared: Arc<Shared>, session: Arc<TraceSession>, stop: Arc<AtomicBo
 
 /// Returns a process exit code. `idle_exit`: quit after this long with no clients, so an elevated
 /// process the UI launched can't linger forever if the UI crashes.
-pub fn run(idle_exit: Option<Duration>) -> i32 {
+pub fn run(idle_exit: Option<Duration>, also_allow: Vec<String>) -> i32 {
     eprintln!("collector serve: elevated={}", is_elevated());
-    let mut server = match PipeServer::new(PIPE_NAME) {
+    let mut server = match PipeServer::new(PIPE_NAME, &also_allow) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("could not build pipe security: {e}");
@@ -250,9 +256,15 @@ pub fn run(idle_exit: Option<Duration>) -> i32 {
                             first = false;
                             let _ = ready_tx.send(Ok(()));
                         }
+                        if shared.clients.load(Ordering::SeqCst) >= MAX_CLIENTS {
+                            eprintln!("too many clients ({MAX_CLIENTS}); closing a new connection");
+                            continue; // `file` drops here, which closes this pipe instance
+                        }
+                        // Counted before the thread starts, so the idle-exit check in `run` can
+                        // never see zero clients while a connection is being set up.
+                        let guard = ClientGuard::new(&shared);
                         let shared = shared.clone();
                         std::thread::spawn(move || {
-                            let guard = ClientGuard::new(&shared);
                             if let Err(e) = handle_client(file, &shared) {
                                 eprintln!("client ended: {e}");
                             }
@@ -327,21 +339,48 @@ fn data_for(topic: Topic, shared: &Shared) -> Response {
     }
 }
 
+/// Reads at most one request, never blocking. `Ok(None)`: no complete request yet. An `Err` of
+/// kind `InvalidData` that is not `is_desync` is a malformed message in an intact stream; any
+/// other error (client gone, stalled mid-frame, oversized frame) means the connection must end.
+fn next_request(file: &mut File, reader: &mut FrameReader) -> io::Result<Option<Request>> {
+    let avail = available(file)? as usize;
+    let req = reader.poll::<_, Request>(file, avail)?;
+    if req.is_none() && reader.stalled_for().is_some_and(|d| d > FRAME_STALL) {
+        return Err(io::Error::new(io::ErrorKind::TimedOut, "client stopped in the middle of a message"));
+    }
+    Ok(req)
+}
+
+/// A client's self-chosen name, shortened and quoted so it can't forge or flood log lines.
+fn log_name(client: &str) -> String {
+    let short: String = client.chars().take(64).collect();
+    format!("{short:?}")
+}
+
 fn handle_client(mut file: File, shared: &Arc<Shared>) -> io::Result<()> {
+    let mut reader = FrameReader::new();
+
     // 1. Handshake: the first frame must be Hello with a matching protocol version.
     let started = Instant::now();
-    loop {
-        if available(&file)? > 0 {
-            break;
+    let first = loop {
+        match next_request(&mut file, &mut reader) {
+            Ok(Some(req)) => break req,
+            Ok(None) => {
+                if started.elapsed() > HELLO_TIMEOUT {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "no Hello"));
+                }
+                std::thread::sleep(POLL);
+            }
+            Err(e) if e.kind() == io::ErrorKind::InvalidData && !is_desync(&e) => {
+                write_frame(&mut file, &Response::Error { message: "first message must be Hello".into() })?;
+                return Ok(());
+            }
+            Err(e) => return Err(e),
         }
-        if started.elapsed() > HELLO_TIMEOUT {
-            return Err(io::Error::new(io::ErrorKind::TimedOut, "no Hello"));
-        }
-        std::thread::sleep(POLL);
-    }
-    match read_frame::<_, Request>(&mut file)? {
-        Some(Request::Hello { protocol_version, client }) if protocol_version == PROTOCOL_VERSION => {
-            eprintln!("client connected: {client}");
+    };
+    match first {
+        Request::Hello { protocol_version, client } if protocol_version == PROTOCOL_VERSION => {
+            eprintln!("client connected: {}", log_name(&client));
             write_frame(
                 &mut file,
                 &Response::HelloAck {
@@ -352,7 +391,7 @@ fn handle_client(mut file: File, shared: &Arc<Shared>) -> io::Result<()> {
                 },
             )?;
         }
-        Some(Request::Hello { protocol_version, .. }) => {
+        Request::Hello { protocol_version, .. } => {
             write_frame(
                 &mut file,
                 &Response::Error {
@@ -375,15 +414,16 @@ fn handle_client(mut file: File, shared: &Arc<Shared>) -> io::Result<()> {
         if shared.shutdown.load(Ordering::SeqCst) {
             return Ok(());
         }
-        while available(&file)? > 0 {
-            let req = match read_frame::<_, Request>(&mut file) {
+        loop {
+            let req = match next_request(&mut file, &mut reader) {
                 Ok(Some(r)) => r,
-                Ok(None) => return Ok(()),
-                Err(e) if e.kind() == io::ErrorKind::InvalidData => {
-                    // Unknown or malformed request: tell the client, keep the connection.
+                Ok(None) => break,
+                Err(e) if e.kind() == io::ErrorKind::InvalidData && !is_desync(&e) => {
+                    // Malformed request inside an intact frame: tell the client, keep the connection.
                     write_frame(&mut file, &Response::Error { message: format!("bad request: {e}") })?;
                     continue;
                 }
+                // Client gone, stalled mid-frame, or the stream lost its frame boundary.
                 Err(e) => return Err(e),
             };
             match req {

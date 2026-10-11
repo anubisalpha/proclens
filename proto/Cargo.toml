@@ -18,6 +18,7 @@ version = "0.62"
 features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_System_Pipes",
     "Win32_System_Registry", # SHELLEXECUTEINFOW embeds HKEY
     "Win32_System_Threading",

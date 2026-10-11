@@ -41,18 +41,26 @@ fn set_status(app: &AppHandle, status: Status) {
     let _ = app.emit("collector-status", status);
 }
 
-/// Where the collector binary should be. Dev builds share a target directory, so it sits next to
-/// this executable; an installed build ships it alongside too. `PROCLENS_COLLECTOR` overrides.
+/// Where the collector binary should be: `collector.exe` next to this executable (dev builds share
+/// a target directory; the installer puts both in Program Files).
+///
+/// Debug builds also honour `PROCLENS_COLLECTOR`. Release builds do not: this path is both what
+/// gets elevated through the UAC prompt and what the client trusts as the pipe's owner, so letting
+/// an environment variable (which any process of the same user can set for the next launch) choose
+/// it would let that process get its own program elevated under ProcLens's name.
 ///
 /// Security note: the client only trusts a pipe served by exactly this file. That is meaningful
 /// when the file lives somewhere a normal user can't write (Program Files); a dev build in a
 /// user-writable folder gets the check but not that guarantee.
-fn collector_path() -> PathBuf {
+fn collector_path() -> Result<PathBuf, String> {
+    #[cfg(debug_assertions)]
     if let Ok(p) = std::env::var("PROCLENS_COLLECTOR") {
-        return PathBuf::from(p);
+        return Ok(PathBuf::from(p));
     }
-    let exe = std::env::current_exe().unwrap_or_default();
-    exe.parent().map(|d| d.join("collector.exe")).unwrap_or_else(|| PathBuf::from("collector.exe"))
+    let exe = std::env::current_exe().map_err(|e| format!("Could not find this program's own location: {e}"))?;
+    exe.parent()
+        .map(|d| d.join("collector.exe"))
+        .ok_or_else(|| "Could not find the folder this program is in.".to_string())
 }
 
 fn friendly(e: &std::io::Error, exe: &std::path::Path) -> String {
@@ -68,15 +76,28 @@ fn friendly(e: &std::io::Error, exe: &std::path::Path) -> String {
 
 /// Connects (launching the collector first if `launch`), then serves the connection until it ends.
 fn run_link(app: AppHandle, launch: bool) {
-    let exe = collector_path();
+    let exe = match collector_path() {
+        Ok(p) => p,
+        Err(reason) => {
+            set_status(&app, Status::Disconnected { reason: Some(reason) });
+            return;
+        }
+    };
     if launch {
         set_status(&app, Status::Connecting);
     }
     let result = match client::connect(&exe, "proclens-ui") {
         Err(e) if launch && e.raw_os_error() == Some(ERROR_FILE_NOT_FOUND) => {
             app.state::<Link>().launched_by_us.store(true, Ordering::SeqCst);
-            // 30 s idle-exit: if this UI dies, the elevated process doesn't linger.
-            client::launch_elevated(&exe, "serve --idle-exit 30")
+            // 30 s idle-exit: if this UI dies, the elevated process doesn't linger. Our own SID is
+            // passed along: a standard user who approves UAC with an administrator's credentials
+            // gets a collector running as that administrator, which would otherwise refuse us.
+            let mut args = String::from("serve --idle-exit 30");
+            if let Ok(sid) = client::current_user_sid() {
+                args.push_str(" --allow-sid ");
+                args.push_str(&sid);
+            }
+            client::launch_elevated(&exe, &args)
                 .and_then(|()| client::connect_with_retry(&exe, "proclens-ui", Duration::from_secs(30)))
         }
         other => other,

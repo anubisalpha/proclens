@@ -52,7 +52,7 @@ cargo build --release -p proclens-app --features custom-protocol
 .\target\release\proclens-app.exe      # click "Start collector", approve the UAC prompt
 ```
 
-The app looks for `collector.exe` next to itself (override with `PROCLENS_COLLECTOR`).
+The app looks for `collector.exe` next to itself. (Debug builds also accept `PROCLENS_COLLECTOR`; release builds ignore it, because that path decides which program gets elevated.)
 
 ```powershell
 cargo test --workspace                       # protocol framing, profile matching
@@ -118,6 +118,15 @@ missing), and writes `dist\proclens-<version>-windows-x64.zip` and
 [`installer/proclens.iss`](installer/proclens.iss). The app holds a named mutex (`ProcLens-App-Running`)
 while it runs, which is how setup and the uninstaller detect it; the name must match `AppMutex` in
 that script. Release notes live in [`docs/releases/`](docs/releases/).
+
+## Security notes
+
+The collector runs elevated and the app does not; they talk over a named pipe.
+
+- **Who can connect:** only the account that started the collector and the account that runs the app (the pipe's access list names exactly those, and nothing sandboxed at Low integrity). Another Windows user, another machine or a sandboxed program cannot.
+- **What that does not stop:** any other program running as *you* can also connect, read what the collector reports (per-process disk and file activity, including files of processes you could not inspect yourself) and ask it to shut down. ProcLens draws its line at the logged-on user, as Task Manager's elevated view does; it does not try to tell the app from other programs of yours. The collector is read-only: it cannot change a process, file or setting.
+- **Which program is elevated:** the app elevates `collector.exe` from its own folder only (Program Files when installed), and before sending anything checks that the pipe is served by that exact file.
+- **Messages:** a client that stops halfway through a message, sends an oversized one, or opens more than 16 connections is disconnected.
 
 ## FAQ
 

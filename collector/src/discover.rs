@@ -583,10 +583,11 @@ fn unbuffered_write(path: &std::path::Path) -> std::io::Result<()> {
         return Err(std::io::Error::other("allocation failed"));
     }
     let result = (|| {
+        // create_new: this process is elevated and the path is in a folder an unprivileged user can
+        // write to, so never open or truncate something that is already there.
         let mut f = std::fs::OpenOptions::new()
             .write(true)
-            .create(true)
-            .truncate(true)
+            .create_new(true)
             .custom_flags(NO_BUFFERING | WRITE_THROUGH)
             .open(path)?;
         for _ in 0..4 {
@@ -606,11 +607,10 @@ fn workload(state: &Mutex<Survey>) -> std::io::Result<()> {
         state.lock().unwrap().phase_marks.push((phase, now));
     };
     const MIB: usize = 1 << 20;
-    let path = std::env::temp_dir().join(format!("proclens-discover-{}.bin", std::process::id()));
+    let (mut f, path) = crate::profile::create_private_temp("proclens-discover", "bin")?;
     let chunk = vec![0x3Cu8; MIB];
 
     mark(PHASE_CACHED_WRITE);
-    let mut f = std::fs::File::create(&path)?;
     for _ in 0..8 {
         f.write_all(&chunk)?;
     }

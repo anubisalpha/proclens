@@ -7,19 +7,26 @@
 //! - `PIPE_REJECT_REMOTE_CLIENTS`: no connections over SMB from other machines.
 //! - Mandatory label "no-write-up, Medium": the normal-privilege UI may connect, but Low-integrity
 //!   (sandboxed) processes of the same user may not.
+//!
+//! What this does *not* do: tell the UI apart from other Medium-integrity processes of the same
+//! user. Any such process can connect, read what the elevated collector reports (per-process I/O
+//! and file paths of processes it could not inspect itself) and send `Shutdown`. A server-side
+//! check of the client's image path would not close that (same-user code can inject into the UI,
+//! and the example tools connect from elsewhere), so the boundary is "the logged-on user", the
+//! same one Task Manager's elevated view draws. See "Security notes" in the README.
 
 use std::fs::File;
 use std::io;
 use std::os::windows::io::FromRawHandle;
 
-use windows::core::{PCWSTR, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, GetLastError, LocalFree, ERROR_PIPE_CONNECTED, HANDLE, HLOCAL};
+use windows::core::PCWSTR;
+use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_PIPE_CONNECTED, HANDLE};
 use windows::Win32::Security::Authorization::{
-    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
 use windows::Win32::Security::{
-    GetTokenInformation, TokenElevation, TokenUser, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
-    TOKEN_ELEVATION, TOKEN_QUERY, TOKEN_USER,
+    GetTokenInformation, TokenElevation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_ELEVATION,
+    TOKEN_QUERY,
 };
 use windows::Win32::Storage::FileSystem::{FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX};
 use windows::Win32::System::Pipes::{
@@ -55,21 +62,31 @@ pub fn is_elevated() -> bool {
     .unwrap_or(false)
 }
 
-/// The current user's SID as a string like `S-1-5-21-...`.
-pub fn user_sid_string() -> io::Result<String> {
-    with_token(|token| unsafe {
-        let mut ret = 0u32;
-        let _ = GetTokenInformation(token, TokenUser, None, 0, &mut ret); // asks for the size
-        let mut buf = vec![0u8; ret as usize];
-        GetTokenInformation(token, TokenUser, Some(buf.as_mut_ptr() as *mut _), ret, &mut ret)
-            .map_err(io::Error::other)?;
-        let user = &*(buf.as_ptr() as *const TOKEN_USER);
-        let mut s = PWSTR::null();
-        ConvertSidToStringSidW(user.User.Sid, &mut s).map_err(io::Error::other)?;
-        let out = s.to_string().map_err(io::Error::other);
-        let _ = LocalFree(Some(HLOCAL(s.0 as *mut _)));
-        out
-    })
+/// True if `s` looks like a SID string (`S-1-5-21-...`). The value goes into an SDDL string, so
+/// anything that isn't plain digits and dashes after `S-1-` is refused rather than escaped.
+pub fn is_valid_sid_string(s: &str) -> bool {
+    s.len() <= 184
+        && s.strip_prefix("S-1-").is_some_and(|rest| {
+            !rest.is_empty()
+                && !rest.starts_with('-')
+                && !rest.ends_with('-')
+                && !rest.contains("--")
+                && rest.bytes().all(|b| b.is_ascii_digit() || b == b'-')
+        })
+}
+
+/// The security descriptor for the pipe: a protected DACL with one GenericAll ACE per distinct
+/// SID, and a Medium no-write-up integrity label.
+fn build_sddl(sids: &[String]) -> String {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut aces = String::new();
+    for sid in sids {
+        if !seen.contains(&sid.as_str()) {
+            seen.push(sid);
+            aces.push_str(&format!("(A;;GA;;;{sid})"));
+        }
+    }
+    format!("D:P{aces}S:(ML;;NW;;;ME)")
 }
 
 pub struct PipeServer {
@@ -82,10 +99,19 @@ pub struct PipeServer {
 unsafe impl Send for PipeServer {}
 
 impl PipeServer {
-    pub fn new(pipe_name: &str) -> io::Result<Self> {
-        let sid = user_sid_string()?;
-        // D:P = protected DACL, one ACE: GenericAll for this user only. S: = integrity label.
-        let sddl = format!("D:P(A;;GA;;;{sid})S:(ML;;NW;;;ME)");
+    /// `also_allow` lists further SIDs that may connect besides this process's own user: the UI's
+    /// account, which differs when a standard user approved the UAC prompt with an administrator's
+    /// credentials (then this process runs as that administrator).
+    pub fn new(pipe_name: &str, also_allow: &[String]) -> io::Result<Self> {
+        let mut sids = vec![proclens_proto::client::current_user_sid()?];
+        for sid in also_allow {
+            if !is_valid_sid_string(sid) {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("not a SID: {sid:?}")));
+            }
+            sids.push(sid.clone());
+        }
+        // D:P = protected DACL, GenericAll per listed SID. S: = integrity label.
+        let sddl = build_sddl(&sids);
         let sddl_w: Vec<u16> = sddl.encode_utf16().chain([0]).collect();
         let mut psd = PSECURITY_DESCRIPTOR::default();
         unsafe {
@@ -140,5 +166,27 @@ impl PipeServer {
             }
         }
         Ok(file)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sid_strings_are_validated_before_they_reach_sddl() {
+        assert!(is_valid_sid_string("S-1-5-21-1004336348-1177238915-682003330-1001"));
+        assert!(is_valid_sid_string("S-1-5-18"));
+        for bad in ["", "S-1-", "S-1--5", "S-1-5-", "S-1-5-21)(A;;GA;;;WD", "s-1-5-18", "S-1-5-1 8", "S-2-5-18", "S-1-5--18", "S-1-5-18
+"] {
+            assert!(!is_valid_sid_string(bad), "{bad:?} must be refused");
+        }
+        assert!(!is_valid_sid_string(&format!("S-1-{}", "1".repeat(200))));
+    }
+
+    #[test]
+    fn sddl_has_one_ace_per_distinct_sid_and_the_label() {
+        let sddl = build_sddl(&["S-1-5-21-1".to_string(), "S-1-5-21-2".to_string(), "S-1-5-21-1".to_string()]);
+        assert_eq!(sddl, "D:P(A;;GA;;;S-1-5-21-1)(A;;GA;;;S-1-5-21-2)S:(ML;;NW;;;ME)");
     }
 }

@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -41,6 +41,35 @@ enum Kind {
     FileIo,
     DiskIo,
     PerfInfo,
+}
+
+const KINDS: [Kind; 4] = [Kind::Thread, Kind::FileIo, Kind::DiskIo, Kind::PerfInfo];
+
+/// How many events of each (kind, opcode) have been seen. Kept outside the state mutex: it is
+/// touched for *every* event (~10^5/s), most of which are not parsed at all.
+struct SeenCounts(Vec<AtomicU64>);
+
+impl SeenCounts {
+    fn new() -> Self {
+        SeenCounts((0..KINDS.len() * 256).map(|_| AtomicU64::new(0)).collect())
+    }
+
+    /// Counts one event; true if it is the first of its (kind, opcode).
+    fn hit(&self, kind: Kind, opcode: u8) -> bool {
+        self.0[kind as usize * 256 + opcode as usize].fetch_add(1, Ordering::Relaxed) == 0
+    }
+
+    /// Every (kind, opcode) seen so far, with its count.
+    fn all(&self) -> Vec<(Kind, u8, u64)> {
+        let mut out = Vec::new();
+        for (i, c) in self.0.iter().enumerate() {
+            let n = c.load(Ordering::Relaxed);
+            if n > 0 {
+                out.push((KINDS[i / 256], (i % 256) as u8, n));
+            }
+        }
+        out
+    }
 }
 
 #[derive(Default, Debug)]
@@ -109,7 +138,8 @@ struct State {
     resolve_tried: HashSet<usize>,
     max_plausible_ticks: i64,
     // --- cumulative diagnostics ---
-    seen: HashMap<(Kind, u8), (String, u64)>,
+    /// Opcode names learned from the first event of each (kind, opcode); counts are in `SeenCounts`.
+    seen: HashMap<(Kind, u8), String>,
     parse_errors: HashMap<String, u64>,
     schema_errors: u64,
     names_from_create: u64,
@@ -135,6 +165,7 @@ impl State {
 /// `params` holds this Windows build's opcodes and flags (from the profile JSON).
 fn handler(
     state: Arc<Mutex<State>>,
+    counts: Arc<SeenCounts>,
     kind: Kind,
     params: Arc<EtwParams>,
 ) -> impl FnMut(&EventRecord, &SchemaLocator) + Send + Sync + 'static {
@@ -148,12 +179,7 @@ fn handler(
         };
         // Schema lookups (TDH) are costly at ~100k events/s: only do them for events we parse,
         // plus once per (kind, opcode) to learn its name for diagnostics.
-        let first_seen = {
-            let mut s = state.lock().unwrap();
-            let e = s.seen.entry((kind, opcode)).or_default();
-            e.1 += 1;
-            e.1 == 1
-        };
+        let first_seen = counts.hit(kind, opcode);
         if !wanted && !first_seen {
             return;
         }
@@ -165,9 +191,7 @@ fn handler(
             }
         };
         if first_seen {
-            if let Some(e) = state.lock().unwrap().seen.get_mut(&(kind, opcode)) {
-                e.0 = schema.opcode_name();
-            }
+            state.lock().unwrap().seen.insert((kind, opcode), schema.opcode_name());
         }
         if !wanted {
             return;
@@ -337,29 +361,39 @@ fn handler(
 
 /// One pass of "which file is this FileObject?" for objects that have bytes but no name yet.
 /// Each object is tried once; handles can be gone or unreadable, in which case it stays unnamed.
+///
+/// An object only goes into `resolve_tried` *after* its lookup finished. `take_interval` reads that
+/// set as "tried and failed, report these bytes as unidentified now"; marking objects before the
+/// (slow, lock-free) lookup would let an interval tick flush them mid-lookup and throw the name
+/// away when it arrived.
 fn resolve_pass(state: &Mutex<State>) {
     let wanted: HashSet<usize> = {
-        let mut s = state.lock().unwrap();
-        let candidates: Vec<usize> = s
-            .unnamed_bytes
+        let s = state.lock().unwrap();
+        s.unnamed_bytes
             .keys()
             .filter(|o| !s.file_names.contains_key(*o) && !s.resolve_tried.contains(*o))
             .copied()
-            .collect();
-        s.resolve_tried.extend(candidates.iter().copied());
-        candidates.into_iter().collect()
+            .collect()
     };
     if wanted.is_empty() {
         return;
     }
     let names = files::resolve(&wanted);
     let mut s = state.lock().unwrap();
-    for (obj, name) in names {
-        // Only apply if the object is still live and unnamed (it may have closed meanwhile).
-        if s.unnamed_bytes.contains_key(&obj) && !s.file_names.contains_key(&obj) {
-            s.file_names.insert(obj, name);
-            s.names_from_handles += 1;
-            s.flush_obj(obj);
+    for obj in wanted {
+        // Only act if the object is still live and unnamed (it may have closed meanwhile).
+        if !s.unnamed_bytes.contains_key(&obj) || s.file_names.contains_key(&obj) {
+            continue;
+        }
+        match names.get(&obj) {
+            Some(name) => {
+                s.file_names.insert(obj, name.clone());
+                s.names_from_handles += 1;
+                s.flush_obj(obj);
+            }
+            None => {
+                s.resolve_tried.insert(obj);
+            }
         }
     }
 }
@@ -418,6 +452,7 @@ pub struct Diagnostics {
 pub struct TraceSession {
     name: String,
     state: Arc<Mutex<State>>,
+    counts: Arc<SeenCounts>,
     trace: Option<KernelTrace>,
     stop: Arc<AtomicBool>,
     resolver: Option<JoinHandle<()>>,
@@ -435,6 +470,7 @@ impl TraceSession {
         let qpc_freq = qpc_freq.max(1);
 
         let state = Arc::new(Mutex::new(State::default()));
+        let counts = Arc::new(SeenCounts::new());
         state.lock().unwrap().max_plausible_ticks = qpc_freq; // one second
 
         // Needed to duplicate handles out of other processes for file-name resolution.
@@ -443,21 +479,21 @@ impl TraceSession {
         }
 
         let thread = Provider::kernel(&kernel_providers::THREAD_PROVIDER)
-            .add_callback(handler(state.clone(), Kind::Thread, params.clone()))
+            .add_callback(handler(state.clone(), counts.clone(), Kind::Thread, params.clone()))
             .build();
         // File events come from several flags (see the profile's file.flags); one provider on the
         // FileIo GUID with them ORed together.
         let file_def = KernelProvider::new(kernel_providers::FILE_IO_PROVIDER.guid, params.file_flags());
         let file = Provider::kernel(&file_def)
-            .add_callback(handler(state.clone(), Kind::FileIo, params.clone()))
+            .add_callback(handler(state.clone(), counts.clone(), Kind::FileIo, params.clone()))
             .build();
         let disk = Provider::kernel(&kernel_providers::DISK_IO_PROVIDER)
-            .add_callback(handler(state.clone(), Kind::DiskIo, params.clone()))
+            .add_callback(handler(state.clone(), counts.clone(), Kind::DiskIo, params.clone()))
             .build();
         // DPC and ISR share the PerfInfo GUID; their flags (perf.flags) are ORed into one provider.
         let perf_def = KernelProvider::new(kernel_providers::DPC_PROVIDER.guid, params.perf_flags());
         let perf = Provider::kernel(&perf_def)
-            .add_callback(handler(state.clone(), Kind::PerfInfo, params.clone()))
+            .add_callback(handler(state.clone(), counts.clone(), Kind::PerfInfo, params.clone()))
             .build();
 
         // A crashed earlier run leaves its session alive (and the name taken); clear it first.
@@ -501,6 +537,7 @@ impl TraceSession {
         Ok(Self {
             name: name.to_string(),
             state,
+            counts,
             trace: Some(trace),
             stop,
             resolver: Some(resolver),
@@ -540,8 +577,12 @@ impl TraceSession {
 
     pub fn diagnostics(&self) -> Diagnostics {
         let s = self.state.lock().unwrap();
-        let mut seen: Vec<_> =
-            s.seen.iter().map(|((k, op), (n, c))| (format!("{k:?}"), *op, n.clone(), *c)).collect();
+        let mut seen: Vec<_> = self
+            .counts
+            .all()
+            .into_iter()
+            .map(|(k, op, c)| (format!("{k:?}"), op, s.seen.get(&(k, op)).cloned().unwrap_or_default(), c))
+            .collect();
         seen.sort();
         let mut parse_errors: Vec<_> = s.parse_errors.iter().map(|(k, v)| (k.clone(), *v)).collect();
         parse_errors.sort();
