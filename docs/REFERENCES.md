@@ -54,6 +54,18 @@ because several of the ETW pages date from 2018-2021.
 | [GetFinalPathNameByHandleW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfinalpathnamebyhandlew) | Read | Naming files opened before the trace | `VOLUME_NAME_NT` (0x2) returns the NT device path (`\Device\HarddiskVolumeN\...`); recommends `QueryDosDevice` on each drive letter to map it back, which is what the collector does. No blocking warning on the page. |
 | [GetFileType](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfiletype) | Read | Skipping non-disk handles during name resolution | **No warning about blocking on pipes.** Our worker-thread-with-timeout around handle queries rests on widely reported behaviour, not on this page. |
 
+## 3a. Network adapters (the Network view)
+
+Last checked 2026-10-11. The first two pages are what the adapter counters are built on; the rest
+are for the per-process traffic that is planned but not built (see `docs/NETWORK_SCOPE.md`).
+
+| Page | Status | What we rely on it for | Notes |
+|---|---|---|---|
+| [GetIfTable2](https://learn.microsoft.com/en-us/windows/win32/api/netioapi/nf-netioapi-getiftable2) | Read | The interface table: "the logical and physical interfaces on a local system"; free it with `FreeMibTable` | Windows Vista and later. No elevation is mentioned, and none was needed on the verified PC. The page says nothing about filter interfaces beyond the flag below. |
+| [MIB_IF_ROW2](https://learn.microsoft.com/en-us/windows/win32/api/netioapi/ns-netioapi-mib_if_row2) | Read | `InterfaceLuid` (stable id), `Alias`, `Description`, `Type`, `PhysicalMediumType`, `InterfaceAndOperStatusFlags` (`HardwareInterface` bit 0, `FilterInterface` bit 1), `OperStatus`, `MediaConnectState`, `TransmitLinkSpeed`/`ReceiveLinkSpeed` ("bits per second"), `InOctets`/`OutOctets` and the error and discard counters | `InOctets` is "octets of data received without errors", including unicast, broadcast and multicast. **The page does not say when the counters restart, and defines no "unknown" link speed** (the code treats 0 and all-ones as unknown; 0 was seen for a disconnected adapter). `InterfaceIndex` "may change when a network adapter is disabled and then enabled", hence the LUID is used as the key. Page dated 2018, updated 2025-11. |
+| [TcpIp class](https://learn.microsoft.com/en-us/windows/win32/etw/tcpip), [TcpIp_SendIPV4](https://learn.microsoft.com/en-us/windows/win32/etw/tcpip-sendipv4), [TcpIp_TypeGroup1](https://learn.microsoft.com/en-us/windows/win32/etw/tcpip-typegroup1), [UdpIp class](https://learn.microsoft.com/en-us/windows/win32/etw/udpip) | Read | Kernel network events for per-process traffic: `EVENT_TRACE_FLAG_NETWORK_TCPIP`, event types, field names (`PID`, `size`, `daddr`, `saddr`, `dport`, `sport`, `seqnum`, `connid`) | Not built yet. "`size`" is only described as "Size of the packet". The header `ProcessId` may not be the originating process; use the `PID` field. TypeGroup2/3/4 field lists and the UDP field lists were not read. |
+| [WlanQueryInterface](https://learn.microsoft.com/en-us/windows/win32/api/wlanapi/nf-wlanapi-wlanqueryinterface), [Changes to API behavior for Wi-Fi access and location](https://learn.microsoft.com/en-us/windows/win32/nativewifi/wi-fi-access-location-changes) | Read | Wi-Fi opcodes; location consent gating of BSSID and `current_connection` | Not built yet; no Wi-Fi adapter on the verified PC. |
+
 ## 4. Not Microsoft: other sources and dependencies
 
 | Source | Status | Used for | Notes |

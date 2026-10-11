@@ -4,6 +4,7 @@
 //! One thread owns the pipe connection. It forwards collector data to the web UI as events and
 //! carries UI commands (subscribe, shutdown) to the collector.
 
+pub mod network;
 mod update;
 
 use std::path::PathBuf;
@@ -246,6 +247,8 @@ pub fn run() {
             start_collector,
             stop_collector,
             set_activity,
+            network::network_snapshot,
+            network::network_selftest,
             update::check_for_update,
             update::open_project_page,
             update::open_release_page

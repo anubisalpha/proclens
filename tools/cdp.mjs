@@ -1,14 +1,17 @@
 // Minimal Chrome DevTools Protocol client for driving/inspecting the running app's WebView2
-// (start the app with WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222).
+// (start the app with WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222, or another
+// port and set CDP_PORT to match: any other WebView2 app on the PC may already be using 9222, and
+// this tool drives the first page it finds there).
 //   node tools/cdp.mjs eval "<js expression>"
 //   node tools/cdp.mjs shot <file.png>
 import { writeFileSync } from "node:fs";
 
 const [, , cmd, arg] = process.argv;
-const targets = await (await fetch("http://127.0.0.1:9222/json")).json();
+const port = process.env.CDP_PORT ?? "9222";
+const targets = await (await fetch(`http://127.0.0.1:${port}/json`)).json();
 const page = targets.find((t) => t.type === "page");
 if (!page) {
-  console.error("no page target; is the app running with --remote-debugging-port=9222?");
+  console.error(`no page target; is the app running with --remote-debugging-port=${port}?`);
   process.exit(2);
 }
 

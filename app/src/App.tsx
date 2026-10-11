@@ -5,15 +5,18 @@ import { DiskView } from "./DiskView";
 import { DriversView } from "./DriversView";
 import { Footer } from "./Footer";
 import { MemoryView } from "./MemoryView";
+import { NetworkView } from "./NetworkView";
 import { ProcessTable } from "./ProcessTable";
 import { ProfileCard } from "./ProfileCard";
+import { useNetwork } from "./useNetwork";
 
-type Tab = "memory" | "disk" | "drivers" | "pc";
+type Tab = "memory" | "disk" | "drivers" | "network" | "pc";
 
 const TABS: { id: Tab; label: string }[] = [
   { id: "memory", label: "Memory" },
   { id: "disk", label: "Disk & files" },
   { id: "drivers", label: "Drivers" },
+  { id: "network", label: "Network" },
   { id: "pc", label: "This PC" },
 ];
 
@@ -21,6 +24,9 @@ export default function App() {
   const { status, memory, processes, profile, activity, error, start, stop, setActivityEnabled } = useCollector();
   const [tab, setTab] = useState<Tab>("memory");
   const connected = status.state === "connected";
+
+  // Adapter counters are read by the app itself; poll them only while a view shows them.
+  const net = useNetwork(!connected || tab === "network");
 
   // The kernel trace is costly, so it only runs while a view that needs it is on screen.
   const wantTrace = connected && (tab === "disk" || tab === "drivers");
@@ -79,6 +85,9 @@ export default function App() {
         </section>
       )}
 
+      {/* Adapter counters need no administrator rights, so they are there even before the collector starts. */}
+      {!connected && <NetworkView net={net} standalone />}
+
       {connected && (
         <>
           <div className="tabs" role="tablist" aria-label="Views">
@@ -105,6 +114,7 @@ export default function App() {
             )}
             {tab === "disk" && <DiskView win={win} profile={profile} />}
             {tab === "drivers" && <DriversView win={win} profile={profile} />}
+            {tab === "network" && <NetworkView net={net} />}
             {tab === "pc" && (profile ? <ProfileCard profile={profile} /> : <p className="dim">Waiting for the first reading…</p>)}
           </div>
         </>

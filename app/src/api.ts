@@ -111,6 +111,41 @@ export interface SystemProfile {
   capabilities: Capability[];
 }
 
+/** One network adapter's counters; mirrors the app's `network::Adapter`. Bytes and packets are running totals. */
+export interface NetworkAdapter {
+  luid: number;
+  name: string;
+  description: string;
+  medium: "ethernet" | "wifi" | "bluetooth" | "mobile" | "other";
+  hardware: boolean;
+  /** The adapters people mean by "my network"; see the app's `network::is_primary`. */
+  primary: boolean;
+  /** IF_OPER_STATUS: 1 up, 2 down, 3 testing, 4 unknown, 5 dormant, 6 not present, 7 lower layer down. */
+  oper_status: number;
+  media_connected: boolean | null;
+  rx_speed_bps: number | null;
+  tx_speed_bps: number | null;
+  rx_bytes: number;
+  tx_bytes: number;
+  rx_packets: number;
+  tx_packets: number;
+  rx_errors: number;
+  tx_errors: number;
+  rx_discards: number;
+  tx_discards: number;
+}
+
+export interface NetworkSnapshot {
+  /** Milliseconds on a monotonic clock; only differences mean anything. */
+  taken_ms: number;
+  adapters: NetworkAdapter[];
+}
+
+export interface NetworkSelfTest {
+  ok: boolean;
+  detail: string;
+}
+
 export type Status =
   | { state: "disconnected"; reason: string | null }
   | { state: "connecting" }

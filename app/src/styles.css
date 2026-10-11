@@ -113,6 +113,8 @@ th[scope="row"] { font-weight: 600; }
 .chip { background: transparent; color: var(--dim); border: 1px solid var(--line); padding: 3px 12px; border-radius: 999px; font-size: 13px; }
 .chip.on { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
 .pid { font-size: 12px; font-weight: 400; margin-left: 4px; }
+.sub { display: block; font-size: 12px; font-weight: 400; }
+.warn { color: var(--err-text); }
 .files th[scope="row"] { font-weight: 500; max-width: 0; width: 100%; }
 .files .file { display: block; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .files .dir { display: block; font-size: 12px; font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }

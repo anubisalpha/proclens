@@ -157,7 +157,14 @@ from the collector's kernel trace; the trace runs only while the Disk or Drivers
 the "This PC" profile with live self-tests (including a real ETW workload test at collector
 startup), launch via UAC, shutdown. See `SPIKE_FINDINGS.md`.
 
+**Network** (adapters only): per-adapter link state, speed, receive and send rates and totals,
+read by the app itself with `GetIfTable2`, so it works before the collector is started and needs no
+administrator approval. The counters were checked against Windows' own `Get-NetAdapterStatistics`
+(five readings each bracketed by two independent ones) and the view was seen live on the one
+verified PC, which has Ethernet and Bluetooth PAN adapters only. Per-program traffic, Wi-Fi and
+Bluetooth devices are not built; see `docs/NETWORK_SCOPE.md`.
+
 Tests: `cargo test --workspace` (protocol, profile matching, activity conversion) and
-`cd app; npm test` (rolling-window merge logic). `proto/examples/activity_demo.rs` checks the whole
+`cd app; npm test` (rolling-window merge logic, network rate and adapter logic). `proto/examples/activity_demo.rs` checks the whole
 streaming path against a known 64 MiB workload; `tools/watch-sessions.ps1` (elevated) logs whether
 the kernel trace session exists, which is how start/stop on tab changes was verified.
